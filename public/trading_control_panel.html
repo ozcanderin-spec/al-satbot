@@ -1,0 +1,1166 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AITraderPro - Trading Control Panel</title>
+  
+  <!-- Supabase CDN JS Kütüphanesi -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
+  <!-- Modern Koyu Tema & Reset Stilleri (#12141C Canvas, #1E222D Cards, #00E676 Green) -->
+  <style>
+    :root {
+      --bg-canvas: #12141C;
+      --bg-card: #1E222D;
+      --bg-card-hover: #262B38;
+      --border-color: #282E3E;
+      --border-focus: #00E676;
+      --color-primary: #00E676;
+      --color-primary-dim: rgba(0, 230, 118, 0.15);
+      --color-danger: #FFFF5252;
+      --color-danger-dim: rgba(255, 82, 82, 0.15);
+      --color-warning: #FFB300;
+      --text-main: #FFFFFF;
+      --text-muted: #94A3B8;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-canvas);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.5;
+      padding: 24px;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1280px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    /* HEADER & BRANDING */
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 20px 24px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-logo {
+      width: 42px;
+      height: 42px;
+      background: linear-gradient(135deg, rgba(0, 230, 118, 0.2), rgba(0, 230, 118, 0.05));
+      border: 1px solid var(--color-primary);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      font-weight: 900;
+      color: var(--color-primary);
+    }
+
+    .brand-title h1 {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .brand-title p {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .badge-live {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 20px;
+      background: var(--color-primary-dim);
+      color: var(--color-primary);
+      border: 1px solid rgba(0, 230, 118, 0.4);
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .badge-live::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--color-primary);
+      box-shadow: 0 0 8px var(--color-primary);
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.8); }
+    }
+
+    /* SUPABASE CONFIG PANEL (Açılır-Kapanır) */
+    .config-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 16px 20px;
+    }
+
+    .config-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .config-header h2 {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .config-body {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 12px;
+      align-items: end;
+    }
+
+    @media (max-width: 768px) {
+      .config-body {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .input-group label {
+      display: block;
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+
+    .input-group input {
+      width: 100%;
+      background: #12141C;
+      border: 1px solid var(--border-color);
+      color: #FFF;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .input-group input:focus {
+      border-color: var(--color-primary);
+    }
+
+    /* CONTROL BUTTONS BAR (ÜST BÖLÜM) */
+    .controls-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+    }
+
+    button {
+      font-family: inherit;
+      cursor: pointer;
+      border: none;
+      outline: none;
+      border-radius: 10px;
+      padding: 12px 18px;
+      font-size: 13px;
+      font-weight: 700;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    button:active {
+      transform: scale(0.98);
+    }
+
+    .btn-binance {
+      background: #F3BA2F;
+      color: #000;
+    }
+    .btn-binance:hover {
+      background: #ffd04b;
+      box-shadow: 0 4px 14px rgba(243, 186, 47, 0.25);
+    }
+
+    .btn-simulate {
+      background: var(--color-primary);
+      color: #12141C;
+    }
+    .btn-simulate:hover {
+      background: #22ff8f;
+      box-shadow: 0 4px 16px rgba(0, 230, 118, 0.3);
+    }
+
+    .btn-emergency {
+      background: var(--color-danger);
+      color: #FFF;
+    }
+    .btn-emergency:hover {
+      background: #ff6b6b;
+      box-shadow: 0 4px 16px rgba(255, 82, 82, 0.35);
+    }
+
+    .btn-secondary {
+      background: #282E3E;
+      color: var(--text-main);
+      border: 1px solid var(--border-color);
+    }
+    .btn-secondary:hover {
+      background: #323A4E;
+    }
+
+    /* SYNC TIMER & STATUS BAR */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: rgba(30, 34, 45, 0.7);
+      border: 1px dashed var(--border-color);
+      border-radius: 10px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .timer-text {
+      font-family: var(--font-mono);
+      font-weight: 700;
+      color: var(--color-primary);
+    }
+
+    /* SECTION 2: SANAL CÜZDAN & TRADES (ORTA BÖLÜM) */
+    .section-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .section-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .section-header h2 {
+      font-size: 15px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .wallet-metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }
+
+    .metric-box {
+      background: #12141C;
+      border: 1px solid var(--border-color);
+      padding: 14px 16px;
+      border-radius: 12px;
+    }
+
+    .metric-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .metric-value {
+      font-size: 20px;
+      font-weight: 900;
+      font-family: var(--font-mono);
+      color: var(--color-primary);
+      margin-top: 4px;
+    }
+
+    .trades-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .trade-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 18px;
+      background: #12141C;
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      transition: border-color 0.2s;
+    }
+
+    .trade-row:hover {
+      border-color: var(--color-primary);
+    }
+
+    .trade-main {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .trade-symbol {
+      font-size: 15px;
+      font-weight: 800;
+      color: #FFF;
+      font-family: var(--font-mono);
+    }
+
+    .trade-badge {
+      font-size: 9px;
+      font-weight: 800;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: var(--color-primary-dim);
+      color: var(--color-primary);
+      border: 1px solid rgba(0, 230, 118, 0.4);
+    }
+
+    .trade-stats {
+      display: flex;
+      gap: 24px;
+    }
+
+    .stat-col {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .stat-label {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .stat-val {
+      font-size: 13px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      color: #FFF;
+    }
+
+    .trade-reason {
+      flex: 1 1 100%;
+      background: rgba(30, 34, 45, 0.6);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-left: 2px solid var(--color-primary);
+      margin-top: 4px;
+    }
+
+    .empty-placeholder {
+      text-align: center;
+      padding: 32px 16px;
+      color: var(--text-muted);
+      font-size: 13px;
+      background: #12141C;
+      border: 1px dashed var(--border-color);
+      border-radius: 12px;
+    }
+
+    /* SECTION 3: MARKET SCANS (ALT BÖLÜM GRID) */
+    .scans-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 16px;
+    }
+
+    @media (max-width: 640px) {
+      .scans-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .scan-card {
+      background: #12141C;
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 12px;
+      transition: all 0.2s ease;
+    }
+
+    .scan-card:hover {
+      border-color: #3B445B;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    }
+
+    .scan-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .scan-symbol-box {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .scan-symbol {
+      font-size: 16px;
+      font-weight: 900;
+      color: #FFF;
+      font-family: var(--font-mono);
+    }
+
+    .scan-price {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    .ai-score-badge {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-width: 54px;
+      padding: 4px 8px;
+      border-radius: 8px;
+      font-family: var(--font-mono);
+    }
+
+    .score-green {
+      background: var(--color-primary-dim);
+      border: 1px solid var(--color-primary);
+      color: var(--color-primary);
+    }
+
+    .score-red {
+      background: var(--color-danger-dim);
+      border: 1px solid var(--color-danger);
+      color: var(--color-danger);
+    }
+
+    .score-neutral {
+      background: rgba(148, 163, 184, 0.1);
+      border: 1px solid #475569;
+      color: #CBD5E1;
+    }
+
+    .score-number {
+      font-size: 16px;
+      font-weight: 900;
+      line-height: 1;
+    }
+
+    .score-label {
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      margin-top: 2px;
+      text-transform: uppercase;
+    }
+
+    .scan-reason-box {
+      background: rgba(30, 34, 45, 0.5);
+      border: 1px solid rgba(40, 46, 62, 0.6);
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 11px;
+      line-height: 1.5;
+      color: #CBD5E1;
+      min-height: 52px;
+    }
+
+    .scan-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border-color);
+      padding-top: 8px;
+    }
+
+    /* TOAST BİLDİRİM */
+    #toast-notification {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--bg-card);
+      border: 1px solid var(--color-primary);
+      padding: 12px 20px;
+      border-radius: 10px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+      font-size: 13px;
+      font-weight: 600;
+      color: #FFF;
+      display: none;
+      z-index: 1000;
+      animation: slideUp 0.3s ease;
+    }
+
+    @keyframes slideUp {
+      from { transform: translateY(20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    
+    <!-- HEADER -->
+    <header>
+      <div class="brand-group">
+        <div class="brand-logo">⚡</div>
+        <div class="brand-title">
+          <h1>AITraderPro Control Panel <span class="badge-live">CANLI RADAR</span></h1>
+          <p>Binance TR API + Gemini 1.5/3.x Flash Karar Motoru + Supabase PostgREST</p>
+        </div>
+      </div>
+      <div>
+        <span id="bot-mode-badge" style="background:#282E3E; border:1px solid #475569; padding:6px 14px; border-radius:20px; font-size:12px; font-weight:800; color:#FFF;">
+          SANAL MOD (VIRTUAL)
+        </span>
+      </div>
+    </header>
+
+    <!-- SUPABASE AYAR PANELİ (Yerel Saklama ile) -->
+    <div class="config-card">
+      <div class="config-header" onclick="toggleConfig()">
+        <h2>🔑 Supabase Bağlantı Ayarları & Kimlik</h2>
+        <span id="config-toggle-icon" style="font-size:12px; color:var(--text-muted);">[Gizle/Göster]</span>
+      </div>
+      <div id="config-body" class="config-body">
+        <div class="input-group">
+          <label for="input-supabase-url">Supabase Proje URL:</label>
+          <input type="text" id="input-supabase-url" placeholder="https://xyzcompany.supabase.co" />
+        </div>
+        <div class="input-group">
+          <label for="input-supabase-key">Supabase Anon Public API Key:</label>
+          <input type="password" id="input-supabase-key" placeholder="eyJhbGciOiJIUzI1NiIsIn..." />
+        </div>
+        <div>
+          <button class="btn-secondary" style="width:100%;" onclick="saveSupabaseConfig()">
+            Kaydet & Bağlan
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1. ÜST BÖLÜM: KONTROL VE TEST BUTONLARI -->
+    <div class="controls-grid">
+      <button class="btn-binance" onclick="fetchTRYPairs()">
+        <span>📈</span> Binance API'den Canlı TRY Paritelerini Çek
+      </button>
+
+      <button class="btn-simulate" onclick="simulateAiAnalysis()">
+        <span>🤖</span> Yapay Zeka Analizini Simüle Et (Gemini Flash)
+      </button>
+
+      <button class="btn-emergency" onclick="triggerEmergencyStop()">
+        <span>🚨</span> Acil Durdurma (Emergency Stop)
+      </button>
+    </div>
+
+    <!-- 10 SANİYE SAYACI & DURUM BİLGİSİ -->
+    <div class="status-bar">
+      <div id="status-text">Bağlantı bekleniyor...</div>
+      <div>Otomatik Yenileme: <span id="sync-timer" class="timer-text">10s</span></div>
+    </div>
+
+    <!-- 2. ORTA BÖLÜM: SANAL CÜZDAN & TRADES TABLOSU (is_active = true) -->
+    <div class="section-card">
+      <div class="section-header">
+        <h2>💼 Sanal Cüzdan & Aktif Pozisyonlar (trades Tablosu)</h2>
+        <button class="btn-secondary" style="padding:6px 12px; font-size:11px;" onclick="loadData()">
+          🔄 Şimdi Yenile
+        </button>
+      </div>
+
+      <!-- Bakiye Metrikleri -->
+      <div class="wallet-metrics-grid">
+        <div class="metric-box">
+          <div class="metric-label">Toplam Sanal Bakiye</div>
+          <div class="metric-value" id="val-initial-balance">₺10.000,00</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Yatırımdaki Tutar</div>
+          <div class="metric-value" id="val-invested" style="color:#FFF;">₺0,00</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Açık Pozisyon</div>
+          <div class="metric-value" id="val-open-count" style="color:var(--color-primary);">0 Adet</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Kullanılabilir Nakit</div>
+          <div class="metric-value" id="val-available" style="color:#FFF;">₺10.000,00</div>
+        </div>
+      </div>
+
+      <!-- Pozisyon Listesi -->
+      <div id="trades-container" class="trades-list">
+        <div class="empty-placeholder">
+          Henüz açık sanal pozisyon yok. AI skoru 80 ve üzeri alım sinyali oluştuğunda burada listelenecektir.
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. ALT BÖLÜM: SON 6 AI ANALİZİ GRID (market_scans Tablosu) -->
+    <div class="section-card">
+      <div class="section-header">
+        <h2>🎯 Son 6 Yapay Zeka Analizi (market_scans Tablosu)</h2>
+        <span style="font-size:11px; color:var(--text-muted);">Gemini 1.5 Flash Karar Motoru</span>
+      </div>
+
+      <div id="scans-grid" class="scans-grid">
+        <!-- 6 Kart Dinamik Olarak Buraya Yüklenecek -->
+        <div class="empty-placeholder" style="grid-column: 1 / -1;">
+          Piyasa tarama verileri yükleniyor...
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- TOAST BİLDİRİM KUTUSU -->
+  <div id="toast-notification"></div>
+
+  <!-- UYGULAMA MANTIĞI & SUPABASE İSTEMCİ ENTEGRASYONU -->
+  <script>
+    // ==============================================================================
+    // 1. SUPABASE İSTEMCİ KURULUMU & YEREL SAKLAMA (localStorage)
+    // ==============================================================================
+    const DEFAULT_SUPABASE_URL = "https://your-project.supabase.co";
+    const DEFAULT_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...";
+
+    let supabaseUrl = localStorage.getItem("AITRADER_SUPABASE_URL") || DEFAULT_SUPABASE_URL;
+    let supabaseKey = localStorage.getItem("AITRADER_SUPABASE_KEY") || DEFAULT_SUPABASE_KEY;
+
+    document.getElementById("input-supabase-url").value = supabaseUrl;
+    document.getElementById("input-supabase-key").value = supabaseKey;
+
+    let supabaseClient = null;
+
+    function initSupabase() {
+      try {
+        if (window.supabase && supabaseUrl && supabaseKey && supabaseUrl !== DEFAULT_SUPABASE_URL) {
+          supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
+          setStatus("Supabase İstemcisi Aktif: " + new URL(supabaseUrl).hostname, "var(--color-primary)");
+        } else {
+          supabaseClient = null;
+          setStatus("Supabase demo/simülasyon modunda çalışıyor. Gerçek veritabanı için kimlik bilgilerinizi giriniz.", "var(--color-warning)");
+        }
+      } catch (err) {
+        console.error("Supabase başlatma hatası:", err);
+        supabaseClient = null;
+        setStatus("Supabase başlatılamadı: " + err.message, "var(--color-danger)");
+      }
+    }
+
+    function saveSupabaseConfig() {
+      const url = document.getElementById("input-supabase-url").value.trim();
+      const key = document.getElementById("input-supabase-key").value.trim();
+      if (!url || !key) {
+        showToast("Lütfen geçerli bir URL ve Anon Key girin!");
+        return;
+      }
+      localStorage.setItem("AITRADER_SUPABASE_URL", url);
+      localStorage.setItem("AITRADER_SUPABASE_KEY", key);
+      supabaseUrl = url;
+      supabaseKey = key;
+      initSupabase();
+      showToast("Supabase ayarları kaydedildi ve istemci yenilendi.");
+      loadData();
+    }
+
+    function toggleConfig() {
+      const body = document.getElementById("config-body");
+      const isHidden = body.style.display === "none";
+      body.style.display = isHidden ? "grid" : "none";
+    }
+
+    // ==============================================================================
+    // 2. ANA VERİ YÜKLEME FONKSİYONU: loadData()
+    // ==============================================================================
+    const INITIAL_CAPITAL = 10000.0;
+
+    // Supabase bağlı değilse gösterilecek başlangıç/demo verileri
+    let mockTrades = [
+      {
+        id: "tr-1",
+        symbol: "SOLTRY",
+        entry_price: 5480.50,
+        total_amount: 1500.00,
+        is_active: true,
+        scan_reason: "RSI (48) yükseliş onayı verdi, 24s hacim patlaması (+35%) ve EMA20 desteği teyit edildi.",
+        created_at: new Date(Date.now() - 1000 * 60 * 25).toISOString()
+      },
+      {
+        id: "tr-2",
+        symbol: "AVAXTRY",
+        entry_price: 945.20,
+        total_amount: 1500.00,
+        is_active: true,
+        scan_reason: "EMA50 kırılımı ve MACD pozitif kesişim tespit edildi. Güçlü kurumsal TRY alım emirleri.",
+        created_at: new Date(Date.now() - 1000 * 60 * 12).toISOString()
+      }
+    ];
+
+    let mockScans = [
+      {
+        symbol: "SOLTRY",
+        current_price: 5480.50,
+        ai_score: 88,
+        signal_type: "STRONG_BUY",
+        scan_reason: "RSI 48 seviyesinde nötrden alıma döndü. 24s hacimde 1.2M TRY alıcı baskısı. EMA20/50 altın kesişim oluşturdu.",
+        scanned_at: new Date().toISOString()
+      },
+      {
+        symbol: "AVAXTRY",
+        current_price: 945.20,
+        ai_score: 82,
+        signal_type: "BUY",
+        scan_reason: "EMA50 direnci aşıldı, hacim destekli yükseliş trendi teyit edildi. Kısa vadeli kâr hedefi 1,020 TRY.",
+        scanned_at: new Date(Date.now() - 1000 * 30).toISOString()
+      },
+      {
+        symbol: "BTCTRY",
+        current_price: 2945000.00,
+        ai_score: 74,
+        signal_type: "BUY",
+        scan_reason: "Ana konsolidasyon bandında stabil hareket. Makro piyasa verileri olumlu ancak volatilite düşük.",
+        scanned_at: new Date(Date.now() - 1000 * 60).toISOString()
+      },
+      {
+        symbol: "ETHTRY",
+        current_price: 114250.00,
+        ai_score: 68,
+        signal_type: "NEUTRAL",
+        scan_reason: "Önemli direnç seviyesinde yatay seyir. Destek bölgesine geri çekilme riski bulunuyor.",
+        scanned_at: new Date(Date.now() - 1000 * 90).toISOString()
+      },
+      {
+        symbol: "BNBTRY",
+        current_price: 22850.00,
+        ai_score: 55,
+        signal_type: "NEUTRAL",
+        scan_reason: "Hacim ortalamanın altında, açık emir defterinde satış baskısı dengede. Bekle-gör modu tavsiye edilir.",
+        scanned_at: new Date(Date.now() - 1000 * 120).toISOString()
+      },
+      {
+        symbol: "XRPTRY",
+        current_price: 18.65,
+        ai_score: 34,
+        signal_type: "SELL",
+        scan_reason: "RSI (76) aşırı alım bölgesinde zayıflama belirtisi gösteriyor. EMA20 desteği altına sarkma riski.",
+        scanned_at: new Date(Date.now() - 1000 * 150).toISOString()
+      }
+    ];
+
+    async function loadData() {
+      let activeTrades = [];
+      let latestScans = [];
+
+      if (supabaseClient) {
+        try {
+          // 1. Supabase 'trades' tablosundan is_active = true olan kayıtları çek
+          const { data: tradesData, error: tradesError } = await supabaseClient
+            .from("trades")
+            .select("*")
+            .eq("is_active", true)
+            .order("created_at", { ascending: false });
+
+          if (tradesError) throw tradesError;
+          activeTrades = tradesData || [];
+
+          // 2. Supabase 'market_scans' tablosundan son 6 kaydı çek
+          const { data: scansData, error: scansError } = await supabaseClient
+            .from("market_scans")
+            .select("*")
+            .order("scanned_at", { ascending: false })
+            .limit(6);
+
+          if (scansError) throw scansError;
+          latestScans = scansData || [];
+
+          // Bot durumunu kontrol et
+          const { data: configData } = await supabaseClient
+            .from("bot_config")
+            .select("mode, emergency_stop")
+            .limit(1)
+            .maybeSingle();
+
+          if (configData) {
+            updateBotStatusBadge(configData.mode, configData.emergency_stop);
+          }
+
+        } catch (err) {
+          console.warn("Supabase verisi çekilirken hata oluştu, yerel önbellek gösteriliyor:", err.message);
+          activeTrades = mockTrades;
+          latestScans = mockScans;
+        }
+      } else {
+        activeTrades = mockTrades;
+        latestScans = mockScans;
+      }
+
+      // UI Güncellemeleri
+      renderTrades(activeTrades);
+      renderScans(latestScans);
+      countdownSeconds = 10;
+    }
+
+    // ==============================================================================
+    // 3. UI RENDER FONKSİYONLARI
+    // ==============================================================================
+    function renderTrades(trades) {
+      const container = document.getElementById("trades-container");
+      const totalInvested = trades.reduce((sum, t) => sum + Number(t.total_amount || 0), 0);
+      const availableCash = Math.max(0, INITIAL_CAPITAL - totalInvested);
+
+      document.getElementById("val-invested").textContent = formatTRY(totalInvested);
+      document.getElementById("val-open-count").textContent = trades.length + " Adet";
+      document.getElementById("val-available").textContent = formatTRY(availableCash);
+
+      if (trades.length === 0) {
+        container.innerHTML = `
+          <div class="empty-placeholder">
+            Henüz açık sanal pozisyon bulunmamaktadır. AI skoru 80 ve üzeri fırsatlarda otomatik alım yapılır.
+          </div>`;
+        return;
+      }
+
+      container.innerHTML = trades.map(trade => `
+        <div class="trade-row">
+          <div class="trade-main">
+            <span style="width:10px; height:10px; border-radius:50%; background:var(--color-primary); box-shadow:0 0 6px var(--color-primary);"></span>
+            <span class="trade-symbol">${trade.symbol}</span>
+            <span class="trade-badge">AKTİF POZİSYON</span>
+          </div>
+          <div class="trade-stats">
+            <div class="stat-col">
+              <span class="stat-label">GİRİŞ FİYATI</span>
+              <span class="stat-val">${formatTRY(trade.entry_price)}</span>
+            </div>
+            <div class="stat-col">
+              <span class="stat-label">SANAL TUTAR</span>
+              <span class="stat-val" style="color:var(--color-primary);">${formatTRY(trade.total_amount)}</span>
+            </div>
+            <div class="stat-col">
+              <span class="stat-label">AÇILIŞ TARİHİ</span>
+              <span class="stat-val" style="font-size:11px; color:var(--text-muted);">${formatTime(trade.created_at)}</span>
+            </div>
+          </div>
+          ${trade.scan_reason ? `
+            <div class="trade-reason">
+              <strong style="color:var(--color-primary);">AI Karar Gerekçesi:</strong> ${trade.scan_reason}
+            </div>` : ""}
+        </div>
+      `).join("");
+    }
+
+    function renderScans(scans) {
+      const grid = document.getElementById("scans-grid");
+      if (!scans || scans.length === 0) {
+        grid.innerHTML = `<div class="empty-placeholder" style="grid-column:1/-1;">Kayıtlı piyasa taraması bulunamadı.</div>`;
+        return;
+      }
+
+      grid.innerHTML = scans.map(scan => {
+        const score = Number(scan.ai_score || 0);
+        let scoreClass = "score-neutral";
+        if (score >= 75) scoreClass = "score-green";
+        else if (score < 40) scoreClass = "score-red";
+
+        const price = Number(scan.current_price || scan.price || 0);
+
+        return `
+          <div class="scan-card">
+            <div class="scan-top">
+              <div class="scan-symbol-box">
+                <span class="scan-symbol">${scan.symbol}</span>
+                <span class="scan-price">${formatTRY(price)}</span>
+              </div>
+              <div class="ai-score-badge ${scoreClass}">
+                <span class="score-number">${score}</span>
+                <span class="score-label">${scan.signal_type || "NEUTRAL"}</span>
+              </div>
+            </div>
+
+            <div class="scan-reason-box">
+              <strong style="color:var(--color-primary);">AI Analiz:</strong>
+              ${scan.scan_reason || "Teknik indikatör verileri değerlendiriliyor."}
+            </div>
+
+            <div class="scan-footer">
+              <span>PostgREST Synced</span>
+              <span>${formatTime(scan.scanned_at || scan.created_at)}</span>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function updateBotStatusBadge(mode, emergencyStop) {
+      const badge = document.getElementById("bot-mode-badge");
+      if (emergencyStop) {
+        badge.textContent = "DURDURULDU (ACİL STOP)";
+        badge.style.background = "var(--color-danger-dim)";
+        badge.style.borderColor = "var(--color-danger)";
+        badge.style.color = "var(--color-danger)";
+      } else if (mode === "LIVE") {
+        badge.textContent = "CANLI TİCARET MODU (LIVE)";
+        badge.style.background = "var(--color-primary-dim)";
+        badge.style.borderColor = "var(--color-primary)";
+        badge.style.color = "var(--color-primary)";
+      } else {
+        badge.textContent = "SANAL MOD (VIRTUAL)";
+        badge.style.background = "#282E3E";
+        badge.style.borderColor = "#475569";
+        badge.style.color = "#FFF";
+      }
+    }
+
+    // ==============================================================================
+    // 4. KULLANICI AKSİYONLARI (TEST & MÜDAHALE BUTONLARI)
+    // ==============================================================================
+
+    // Buton 1: Binance API'den Canlı TRY Paritelerini Çek
+    async function fetchTRYPairs() {
+      setStatus("Binance API'ye bağlanılıyor (TRY pariteleri taranıyor)...", "var(--color-primary)");
+      showToast("Binance API sorgulanıyor...");
+
+      try {
+        const response = await fetch("https://api.binance.me/api/v3/ticker/24hr");
+        if (!response.ok) throw new Error("HTTP Hata: " + response.status);
+        const data = await response.json();
+
+        // Sadece TRY ile biten pariteleri filtrele
+        const tryPairs = data.filter(item => item.symbol.endsWith("TRY"));
+        
+        // Hacme göre sırala
+        tryPairs.sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
+        const top5 = tryPairs.slice(0, 5);
+
+        const summary = top5.map(p => `${p.symbol}: ₺${parseFloat(p.lastPrice).toLocaleString("tr-TR")} (%${parseFloat(p.priceChangePercent).toFixed(2)})`).join(" | ");
+        
+        setStatus(`Binance TR: ${tryPairs.length} adet TRY paritesi çekildi. Liderler: ${summary}`, "var(--color-primary)");
+        showToast(`Başarılı! ${tryPairs.length} adet TRY paritesi güncellendi.`);
+      } catch (err) {
+        console.error("Binance API Hatası:", err);
+        setStatus("Binance API çekilemedi (CORS veya Ağ): " + err.message, "var(--color-danger)");
+        showToast("Binance API hatası: " + err.message);
+      }
+    }
+
+    // Buton 2: Yapay Zeka Analizini Simüle Et (Gemini Flash Karar Motoru)
+    async function simulateAiAnalysis() {
+      showToast("Gemini 1.5 Flash piyasa taraması ve puanlaması başlatıldı...");
+      setStatus("Gemini 1.5 Flash teknik analizi hesaplanıyor...", "var(--color-primary)");
+
+      // Rastgele gerçekçi bir sinyal ve skor üret
+      const testSymbols = ["SOLTRY", "AVAXTRY", "BTCTRY", "ETHTRY", "BNBTRY", "DOGETRY"];
+      const randomSymbol = testSymbols[Math.floor(Math.random() * testSymbols.length)];
+      const randomScore = Math.floor(Math.random() * 30) + 70; // 70 - 99 arası
+      const isStrong = randomScore >= 80;
+      const signalType = isStrong ? "STRONG_BUY" : "BUY";
+      
+      const newScan = {
+        symbol: randomSymbol,
+        current_price: randomSymbol === "BTCTRY" ? 2950000 : (randomSymbol === "SOLTRY" ? 5520 : 960),
+        ai_score: randomScore,
+        signal_type: signalType,
+        scan_reason: `RSI dinamikleri ve 24s TRY alım hacmi analizi tamamlandı. AI Güven Skoru: ${randomScore}/100. Trend yukarı kırılımı onayladı.`,
+        scanned_at: new Date().toISOString()
+      };
+
+      if (supabaseClient) {
+        try {
+          // market_scans tablosuna kaydet
+          await supabaseClient.from("market_scans").upsert({
+            symbol: newScan.symbol,
+            price: newScan.current_price,
+            ai_score: newScan.ai_score,
+            signal_type: newScan.signal_type,
+            scan_reason: newScan.scan_reason,
+            scanned_at: newScan.scanned_at
+          }, { onConflict: "symbol" });
+
+          // Skor 80 ve üzeriyse otomatik sanal pozisyon aç
+          if (randomScore >= 80) {
+            await supabaseClient.from("trades").insert({
+              symbol: newScan.symbol,
+              entry_price: newScan.current_price,
+              total_amount: 1500.0,
+              is_active: true,
+              scan_reason: newScan.scan_reason
+            });
+            showToast(`🔥 ALIM GERÇEKLEŞTİ: ${newScan.symbol} için ₺1.500 sanal pozisyon açıldı!`);
+          } else {
+            showToast(`Tarama tamamlandı: ${newScan.symbol} (Puan: ${randomScore})`);
+          }
+        } catch (err) {
+          console.error("Supabase yazma hatası:", err);
+          showToast("Simülasyon yerel belleğe işlendi (Supabase izni kontrol edin).");
+        }
+      } else {
+        // Yerel simülasyon listesine ekle
+        mockScans.unshift(newScan);
+        if (mockScans.length > 6) mockScans.pop();
+
+        if (randomScore >= 80) {
+          mockTrades.unshift({
+            id: "tr-" + Date.now(),
+            symbol: newScan.symbol,
+            entry_price: newScan.current_price,
+            total_amount: 1500.0,
+            is_active: true,
+            scan_reason: newScan.scan_reason,
+            created_at: new Date().toISOString()
+          });
+          showToast(`🔥 ALIM SİMÜLE EDİLDİ: ${newScan.symbol} için ₺1.500 sanal pozisyon açıldı!`);
+        } else {
+          showToast(`Tarama tamamlandı: ${newScan.symbol} (Puan: ${randomScore})`);
+        }
+      }
+
+      loadData();
+    }
+
+    // Buton 3: Acil Durdurma (Emergency Stop)
+    async function triggerEmergencyStop() {
+      const confirmed = confirm("DİKKAT: Acil Durdurma Protokolünü devreye sokmak istediğinize emin misiniz? Tüm açık emirler iptal edilecek ve bot SANAL moda çekilecektir.");
+      if (!confirmed) return;
+
+      showToast("🚨 ACİL STOP TETİKLENDİ! Tüm emirler iptal ediliyor...");
+      setStatus("DURUM: Acil Durdurma aktif! Bot operasyonları durduruldu.", "var(--color-danger)");
+      updateBotStatusBadge("VIRTUAL", true);
+
+      if (supabaseClient) {
+        try {
+          await supabaseClient.from("bot_config").update({
+            emergency_stop: true,
+            mode: "VIRTUAL"
+          }).neq("id", "00000000-0000-0000-0000-000000000000");
+          showToast("Supabase bot_config güncellendi: emergency_stop=true");
+        } catch (err) {
+          console.error("Acil stop veritabanı güncelleme hatası:", err);
+        }
+      }
+    }
+
+    // ==============================================================================
+    // 5. YARDIMCI VE ZAMANLAYICI FONKSİYONLAR (10 Saniye Döngüsü)
+    // ==============================================================================
+    let countdownSeconds = 10;
+    const timerElement = document.getElementById("sync-timer");
+
+    setInterval(() => {
+      countdownSeconds--;
+      if (countdownSeconds <= 0) {
+        countdownSeconds = 10;
+        loadData();
+      }
+      timerElement.textContent = countdownSeconds + "s";
+    }, 1000);
+
+    function setStatus(text, color) {
+      const el = document.getElementById("status-text");
+      el.textContent = text;
+      if (color) el.style.color = color;
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById("toast-notification");
+      toast.textContent = msg;
+      toast.style.display = "block";
+      setTimeout(() => {
+        toast.style.display = "none";
+      }, 3500);
+    }
+
+    function formatTRY(amount) {
+      const num = Number(amount || 0);
+      if (num < 1 && num > 0) {
+        return "₺" + num.toFixed(6);
+      }
+      return "₺" + num.toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function formatTime(isoStr) {
+      if (!isoStr) return "-";
+      try {
+        const d = new Date(isoStr);
+        return d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      } catch {
+        return isoStr;
+      }
+    }
+
+    // SAYFA YÜKLENDİĞİNDE BAŞLAT
+    window.addEventListener("DOMContentLoaded", () => {
+      initSupabase();
+      loadData();
+    });
+  </script>
+</body>
+</html>

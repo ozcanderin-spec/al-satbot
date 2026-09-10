@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "Binance TR AlgoTrader AI",
+  "short_name": "AlgoTrader",
+  "description": "Binance TR Gemini 3.6 Flash Algoritmik Al-Sat ve Piyasa Tarama Android Uygulaması",
+  "theme_color": "#12141C",
+  "background_color": "#12141C",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": "/",
+  "scope": "/",
+  "categories": ["finance", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
