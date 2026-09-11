@@ -93,7 +93,10 @@ class SupabaseRestClient:
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/rest/v1/trades"
-        params = {"select": "symbol", "is_active": "eq.true"}
+        params = {
+            "select": "id,symbol,entry_price,quantity,total_amount,highest_price_reached",
+            "is_active": "eq.true"
+        }
         try:
             resp = requests.get(url, headers=self.headers, params=params, timeout=10)
             resp.raise_for_status()
@@ -101,6 +104,37 @@ class SupabaseRestClient:
         except Exception as e:
             logger.error(f"Açık pozisyonlar okunamadı: {e}")
             return []
+
+    def update_trade_peak(self, trade_id: str, highest_price_reached: float, trailing_stop_price: Any = None) -> None:
+        url = f"{self.base_url}/rest/v1/trades"
+        payload: Dict[str, Any] = {"highest_price_reached": highest_price_reached}
+        if trailing_stop_price is not None:
+            payload["trailing_stop_price"] = trailing_stop_price
+        try:
+            requests.patch(url, headers=self.headers, params={"id": f"eq.{trade_id}"}, json=payload, timeout=10)
+        except Exception as e:
+            logger.warning(f"Zirve fiyat güncellenemedi ({trade_id}): {e}")
+
+    def close_trade(self, trade_id: str, exit_price: float, realized_pnl: float, reason: str) -> bool:
+        url = f"{self.base_url}/rest/v1/trades"
+        payload = {
+            "is_active": False,
+            "status": "FILLED",
+            "exit_price": exit_price,
+            "realized_pnl": realized_pnl,
+            "notes": reason,
+            "closed_at": pd.Timestamp.utcnow().isoformat(),
+        }
+        try:
+            resp = requests.patch(url, headers=self.headers, params={"id": f"eq.{trade_id}"}, json=payload, timeout=10)
+            if resp.status_code in (200, 201, 204):
+                logger.info(f"POZİSYON KAPANDI: {trade_id} - Sebep: {reason} - PnL: ₺{realized_pnl:.2f}")
+                return True
+            logger.error(f"trades kapama hatası ({resp.status_code}): {resp.text}")
+            return False
+        except Exception as e:
+            logger.error(f"trades kapama isteği başarısız: {e}")
+            return False
 
     def upsert_market_scans(self, records: List[Dict[str, Any]]) -> bool:
         url = f"{self.base_url}/rest/v1/market_scans"
@@ -138,7 +172,9 @@ BINANCE_TICKER_URLS = [
 ]
 
 
-def fetch_top_20_try_pairs() -> pd.DataFrame:
+def fetch_all_try_data() -> pd.DataFrame:
+    """Binance'ten TÜM TRY paritelerini (hacim filtresi olmadan) çeker.
+    Hem tarama (top 20) hem de açık pozisyon izleme (herhangi bir sembol) için kullanılır."""
     logger.info("Binance gerçek piyasa verisi çekiliyor...")
 
     raw_data = None
@@ -165,10 +201,14 @@ def fetch_top_20_try_pairs() -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
     df_try = df[df['symbol'].str.endswith('TRY')].copy()
-    df_try = df_try[df_try['quoteVolume'] > 100000]
-    df_top20 = df_try.sort_values(by='quoteVolume', ascending=False).head(20).reset_index(drop=True)
+    logger.info(f"Binance'ten toplam {len(df_try)} TRY paritesi çekildi (web uygulamasıyla aynı kaynak).")
+    return df_try
 
-    logger.info(f"Binance'ten {len(df_top20)} gerçek TRY paritesi çekildi (web uygulamasıyla aynı kaynak).")
+
+def fetch_top_20_try_pairs(df_all: pd.DataFrame) -> pd.DataFrame:
+    df_liquid = df_all[df_all['quoteVolume'] > 100000]
+    df_top20 = df_liquid.sort_values(by='quoteVolume', ascending=False).head(20).reset_index(drop=True)
+    logger.info(f"En yüksek hacimli {len(df_top20)} parite tarama için seçildi.")
     return df_top20
 
 
@@ -223,7 +263,84 @@ def fetch_top_20_try_pairs_yahoo_fallback() -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------------------
-# 4. GEMINI KARAR VE PUANLAMA MOTORU
+# 5. POZİSYON İZLEME: STOP-LOSS / TAKE-PROFIT / İZ SÜREN STOP
+# ------------------------------------------------------------------------------
+# Not: Bu eşikler web uygulamasındaki (useTradingEngine.ts) mantıkla birebir
+# aynı tutulmuştur, böylece tarayıcı kapalıyken de aynı kararlar alınır.
+STOP_LOSS_PERCENT_DEFAULT = 1.2
+TAKE_PROFIT_PERCENT_DEFAULT = 5.0
+TRAILING_ACTIVATION_PCT = 2.8   # Bu net kâr yüzdesine ulaşınca iz süren stop devreye girer
+FEE_RATE = 0.001                 # Binance standart %0.1 komisyon
+
+
+def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[str, float], config: Dict[str, Any]):
+    logger.info("--- Açık pozisyonlar izleniyor (stop-loss / take-profit / iz süren stop) ---")
+
+    stop_loss_percent = float(config.get("stop_loss_percent", STOP_LOSS_PERCENT_DEFAULT) or STOP_LOSS_PERCENT_DEFAULT)
+    take_profit_percent = float(config.get("take_profit_percent", TAKE_PROFIT_PERCENT_DEFAULT) or TAKE_PROFIT_PERCENT_DEFAULT)
+
+    open_positions = client.get_open_positions()
+    if not open_positions:
+        logger.info("Açık pozisyon yok, izleme atlanıyor.")
+        return
+
+    for trade in open_positions:
+        symbol = trade.get("symbol")
+        live_price = price_lookup.get(symbol)
+        if live_price is None:
+            logger.warning(f"{symbol} için güncel fiyat bulunamadı, bu pozisyon bu döngüde atlanıyor.")
+            continue
+
+        entry_price = float(trade.get("entry_price") or 0)
+        quantity = float(trade.get("quantity") or 0)
+        total_amount = float(trade.get("total_amount") or 0)
+        previous_highest = float(trade.get("highest_price_reached") or entry_price)
+
+        if entry_price <= 0 or quantity <= 0 or total_amount <= 0:
+            logger.warning(f"{symbol} için geçersiz işlem verisi, atlanıyor.")
+            continue
+
+        live_highest = max(previous_highest, live_price)
+
+        # Anlık net değer (satış komisyonu düşülmüş):
+        gross_value = quantity * live_price
+        sell_fee = gross_value * FEE_RATE
+        live_value = gross_value - sell_fee
+        pnl = live_value - total_amount
+        pnl_pct = (pnl / total_amount) * 100
+
+        # Zirve net değer ve zirve kâr yüzdesi:
+        gross_peak_value = quantity * live_highest
+        peak_sell_fee = gross_peak_value * FEE_RATE
+        net_peak_value = gross_peak_value - peak_sell_fee
+        peak_profit_pct = ((net_peak_value - total_amount) / total_amount) * 100
+
+        is_trailing_active = peak_profit_pct >= TRAILING_ACTIVATION_PCT
+        drawdown_pct = ((net_peak_value - live_value) / net_peak_value) * 100 if net_peak_value else 0
+
+        should_trigger_sl = (
+            (drawdown_pct >= stop_loss_percent) if is_trailing_active
+            else (pnl_pct <= -stop_loss_percent)
+        )
+        should_trigger_tp = (not should_trigger_sl) and (pnl_pct >= take_profit_percent)
+
+        if should_trigger_sl or should_trigger_tp:
+            reason = "STOP_LOSS" if should_trigger_sl else "TAKE_PROFIT"
+            client.close_trade(trade["id"], exit_price=live_price, realized_pnl=round(pnl, 2), reason=reason)
+        else:
+            # Kapanmadıysa, zirve fiyat yükseldiyse kalıcı olarak güncelle
+            if live_highest > previous_highest:
+                trailing_stop_price = (
+                    round(live_highest * (1 - stop_loss_percent / 100), 8) if is_trailing_active else None
+                )
+                client.update_trade_peak(trade["id"], live_highest, trailing_stop_price)
+            logger.info(f"{symbol}: PnL %{pnl_pct:.2f} | Zirve kâr %{peak_profit_pct:.2f} | Trailing aktif: {is_trailing_active} — açık kalıyor.")
+
+    logger.info("--- Pozisyon izleme tamamlandı ---")
+
+
+# ------------------------------------------------------------------------------
+# 6. GEMINI KARAR VE PUANLAMA MOTORU
 # ------------------------------------------------------------------------------
 def analyze_markets_with_gemini(df: pd.DataFrame) -> List[Dict[str, Any]]:
     logger.info("Gemini Algo-Trading Karar Motoru çalıştırılıyor...")
@@ -284,7 +401,18 @@ def run_scan_cycle(client: SupabaseRestClient):
         logger.warning("ACİL DURDURMA aktif! Yeni alım yapılmayacak.")
         return
 
-    df_top20 = fetch_top_20_try_pairs()
+    df_all = fetch_all_try_data()
+    if df_all.empty:
+        logger.error("Binance verisi boş geldi, döngü atlanıyor.")
+        return
+
+    price_lookup = dict(zip(df_all['symbol'], df_all['lastPrice']))
+
+    # Önce açık pozisyonları güncel fiyatlarla kontrol et ve gerekiyorsa kapat
+    # (tarayıcı kapalı olsa bile stop-loss/take-profit/iz süren stop çalışsın diye)
+    monitor_and_close_positions(client, price_lookup, config)
+
+    df_top20 = fetch_top_20_try_pairs(df_all)
     if df_top20.empty:
         logger.error("Binance verisi boş geldi, döngü atlanıyor.")
         return
