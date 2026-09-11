@@ -199,7 +199,7 @@ export function useTradingEngine() {
             is_active: true,
             scan_reason: row.scan_reason || '',
             created_at: row.created_at || new Date().toISOString(),
-            highest_price: entryPrice,
+            highest_price: row.highest_price_reached ? Number(row.highest_price_reached) : entryPrice,
           };
         });
 
@@ -402,6 +402,26 @@ export function useTradingEngine() {
       } 
       else {
         remainingTrades.push(updatedTrade);
+
+        // Yeni bir zirve fiyata ulaşıldıysa, iz süren stop'un kalıcı olması için
+        // bunu Supabase'e yaz (sayfa yenilense veya başka bir cihazdan bakılsa bile kaybolmasın).
+        if (liveHighest > previousHighest) {
+          try {
+            const sb = getSupabase();
+            const trailingStopPrice = isTrailingActive
+              ? +(liveHighest * (1 - activeSLPercent / 100)).toFixed(8)
+              : null;
+            const peakUpdatePayload: Record<string, unknown> = { highest_price_reached: liveHighest };
+            if (trailingStopPrice !== null) {
+              peakUpdatePayload.trailing_stop_price = trailingStopPrice;
+            }
+            if (trade.id && !trade.id.startsWith('trade-')) {
+              sb.from('trades').update(peakUpdatePayload).eq('id', trade.id).then();
+            }
+          } catch (err) {
+            console.warn('Zirve fiyat güncelleme hatası:', err);
+          }
+        }
       }
     });
 
@@ -442,7 +462,7 @@ export function useTradingEngine() {
           const updateData = {
             is_active: false,
             status: 'FILLED',
-            price: trade.current_price,
+            exit_price: trade.current_price,
             realized_pnl: trade.unrealized_pnl,
             notes: reason,
             closed_at: new Date().toISOString()
@@ -812,7 +832,7 @@ export function useTradingEngine() {
       const updateData = {
         is_active: false,
         status: 'FILLED',
-        price: exitPrice,
+        exit_price: exitPrice,
         realized_pnl: realizedPnl,
         notes: reason,
         closed_at: new Date().toISOString()
