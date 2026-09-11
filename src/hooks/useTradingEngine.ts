@@ -714,10 +714,10 @@ export function useTradingEngine() {
       const channel = sb
         .channel('supabase-trading-sync')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
-          syncWithSupabase();
+          setTimeout(() => syncWithSupabase(), 400);
         })
         .on('postgres_changes', { event: '*', schema: 'public', table: 'bot_config' }, () => {
-          syncWithSupabase();
+          setTimeout(() => syncWithSupabase(), 400);
         })
         .subscribe();
 
@@ -735,11 +735,13 @@ export function useTradingEngine() {
       const currentConfig = botConfigRef.current;
       if (currentConfig.emergency_stop) return;
 
-      // Fetch live real prices from Binance silently
+      // Fetch live real prices from Binance silently (yalnızca ekrandaki fiyat/PNL gösterimi için)
       handleLiveBinanceFetch(true);
 
-      // Periodically sync from Supabase to keep all devices identical
-      syncWithSupabase();
+      // NOT: Buradaki periyodik syncWithSupabase() çağrısı kasıtlı olarak kaldırıldı.
+      // Bu tarayıcının kendi kapatma yazma işlemiyle yarışıp "titreme" (flicker)
+      // yaratıyordu. Artık senkronizasyon SADECE gerçek zamanlı (realtime) veritabanı
+      // olaylarıyla ve sayfa ilk açıldığında tetikleniyor — bu yeterli ve daha kararlı.
 
       // Collect symbols to fetch 15m/1h candle data for
       const heldSymbols = tradesRef.current.map(t => t.symbol);
@@ -750,25 +752,16 @@ export function useTradingEngine() {
         fetchMultiIntervalForSymbols(targetSymbols);
       }
 
-      // Autonomous Bot Buy if conditions are met
-      if (
-        tradesRef.current.length < currentConfig.max_open_positions &&
-        cashBalanceRef.current >= 1500 &&
-        Math.random() < 0.20
-      ) {
-        const candidate = scansRef.current.find(
-          s => s.ai_score >= currentConfig.min_ai_score_to_buy &&
-               !tradesRef.current.some(t => t.symbol === s.symbol)
-        );
-
-        if (candidate) {
-          buyPosition(candidate, 1500.0);
-        }
-      }
+      // NOT: Buradaki "Otonom Bot Alımı" (rastgele/otomatik alım) bloğu kasıtlı
+      // olarak kaldırıldı. Artık TEK otomatik alıcı GitHub Actions üzerinde 7/24
+      // çalışan trading_bot.py. Tarayıcının da aynı anda kendi kendine alım
+      // yapması, iki ayrı "kaptan" aynı cüzdanı yönetmeye çalışması anlamına
+      // geliyordu ve tutarsızlıklara (titreme, çakışan işlemler) yol açıyordu.
     }, 6000);
 
     return () => clearInterval(interval);
   }, [handleLiveBinanceFetch, fetchMultiIntervalForSymbols]);
+
 
   // Helper: Close a single trade at current market price (with 0.1% sell commission)
   const closePosition = useCallback((
