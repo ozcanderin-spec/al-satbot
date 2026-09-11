@@ -86,10 +86,10 @@ class SupabaseRestClient:
             data = resp.json()
             if data and len(data) > 0:
                 return data[0]
-            return {"mode": "VIRTUAL", "emergency_stop": False, "max_open_positions": 3, "min_ai_score": 75}
+            return {"active_mode": "VIRTUAL", "emergency_stop": False, "max_open_positions": 3, "min_ai_score_to_buy": 75}
         except Exception as e:
             logger.error(f"bot_config okunamadı: {e}")
-            return {"mode": "VIRTUAL", "emergency_stop": False, "max_open_positions": 3, "min_ai_score": 75}
+            return {"active_mode": "VIRTUAL", "emergency_stop": False, "max_open_positions": 3, "min_ai_score_to_buy": 75}
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/rest/v1/trades"
@@ -130,10 +130,51 @@ class SupabaseRestClient:
 
 
 # ------------------------------------------------------------------------------
-# 3. YAHOO FINANCE: WATCHLIST FİYAT VERİSİNİ ÇEKME (TRY CİNSİNDEN)
+# 3. BİNANCE GERÇEK VERİ (data-api.binance.vision aynası): TOP 20 TRY PARİTESİ
 # ------------------------------------------------------------------------------
+BINANCE_TICKER_URLS = [
+    "https://data-api.binance.vision/api/v3/ticker/24hr",  # Bulut IP'lerinde engellenmeyen resmi ayna
+    "https://api.binance.com/api/v3/ticker/24hr",           # Web uygulamasının kullandığı ana adres (yedek)
+]
+
+
 def fetch_top_20_try_pairs() -> pd.DataFrame:
-    logger.info("Yahoo Finance üzerinden piyasa verisi çekiliyor...")
+    logger.info("Binance gerçek piyasa verisi çekiliyor...")
+
+    raw_data = None
+    last_error = None
+    for url in BINANCE_TICKER_URLS:
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            raw_data = resp.json()
+            logger.info(f"Veri kaynağı: {url}")
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning(f"{url} başarısız: {e}")
+            continue
+
+    if raw_data is None:
+        logger.error(f"Hiçbir Binance kaynağına ulaşılamadı, Yahoo Finance'e geri dönülüyor: {last_error}")
+        return fetch_top_20_try_pairs_yahoo_fallback()
+
+    df = pd.DataFrame(raw_data)
+    numeric_cols = ['lastPrice', 'priceChangePercent', 'volume', 'quoteVolume', 'highPrice', 'lowPrice']
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    df_try = df[df['symbol'].str.endswith('TRY')].copy()
+    df_try = df_try[df_try['quoteVolume'] > 100000]
+    df_top20 = df_try.sort_values(by='quoteVolume', ascending=False).head(20).reset_index(drop=True)
+
+    logger.info(f"Binance'ten {len(df_top20)} gerçek TRY paritesi çekildi (web uygulamasıyla aynı kaynak).")
+    return df_top20
+
+
+def fetch_top_20_try_pairs_yahoo_fallback() -> pd.DataFrame:
+    """Binance'e hiçbir yoldan ulaşılamazsa devreye giren yedek yöntem (tahmini fiyat)."""
+    logger.info("[YEDEK] Yahoo Finance üzerinden tahmini piyasa verisi çekiliyor...")
 
     try:
         usdtry_hist = yf.Ticker("USDTRY=X").history(period="1d")
@@ -232,10 +273,10 @@ def run_scan_cycle(client: SupabaseRestClient):
     logger.info("=== YENİ TARAMA DÖNGÜSÜ BAŞLATILDI ===")
 
     config = client.get_bot_config()
-    mode = config.get("mode", "VIRTUAL")
+    mode = config.get("active_mode", "VIRTUAL")
     emergency_stop = config.get("emergency_stop", False)
     max_positions = int(config.get("max_open_positions", 3) or 3)
-    min_ai_score = int(config.get("min_ai_score", 75) or 75)
+    min_ai_score = int(config.get("min_ai_score_to_buy", 75) or 75)
 
     logger.info(f"Mod: {mode} | Acil Durdurma: {emergency_stop} | Min Skor: {min_ai_score} | Maks Pozisyon: {max_positions}")
 
