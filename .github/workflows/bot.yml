@@ -1,0 +1,28 @@
+name: Algo Trading Bot Scan
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # Her 10 dakikada bir çalışır
+  workflow_dispatch: {}       # Elle de tetiklenebilir (Actions sekmesinden "Run workflow")
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Gereksinimleri kur
+        run: pip install requests pandas google-generativeai
+
+      - name: Botu çalıştır
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python trading_bot.py
