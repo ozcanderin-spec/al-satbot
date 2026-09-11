@@ -251,22 +251,37 @@ def run_scan_cycle(client: SupabaseRestClient):
     ai_evaluations = analyze_markets_with_gemini(df_top20)
     ai_dict = {item["symbol"]: item for item in ai_evaluations if "symbol" in item}
 
-    records_to_upsert = []
+    records_to_upsert = []      # İç mantık için (alım kararı vb.)
+    market_scan_payload = []    # Supabase 'market_scans' tablosunun gerçek sütun adlarıyla
     for _, row in df_top20.iterrows():
         sym = row['symbol']
         ai_data = ai_dict.get(sym, {"ai_score": 50, "signal_type": "NEUTRAL", "scan_reason": "Analiz bekleniyor."})
+        ai_score = int(ai_data.get("ai_score", 50))
+        signal_type = str(ai_data.get("signal_type", "NEUTRAL"))
+        scan_reason = str(ai_data.get("scan_reason", "Teknik tarama tamamlandı."))
+
         record = {
             "symbol": sym,
             "price": float(row['lastPrice']),
-            "volume_24h_try": float(row['quoteVolume']),
-            "change_24h_percent": float(row['priceChangePercent']),
-            "ai_score": int(ai_data.get("ai_score", 50)),
-            "signal_type": str(ai_data.get("signal_type", "NEUTRAL")),
-            "scan_reason": str(ai_data.get("scan_reason", "Teknik tarama tamamlandı.")),
+            "ai_score": ai_score,
+            "signal_type": signal_type,
+            "scan_reason": scan_reason,
         }
         records_to_upsert.append(record)
 
-    client.upsert_market_scans(records_to_upsert)
+        market_scan_payload.append({
+            "symbol": sym,
+            "current_price": float(row['lastPrice']),
+            "volume_24h": float(row['quoteVolume']),
+            "price_change_24h_pct": float(row['priceChangePercent']),
+            "ai_score": ai_score,
+            "signal_type": signal_type,
+            "scan_reason": scan_reason,
+        })
+
+    scans_ok = client.upsert_market_scans(market_scan_payload)
+    if not scans_ok:
+        raise RuntimeError("market_scans tablosuna yazma başarısız oldu (yukarıdaki hata mesajına bakın).")
 
     # --- Otonom Sanal Alım Mantığı ---
     if mode != "VIRTUAL":
