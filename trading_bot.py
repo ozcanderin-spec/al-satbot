@@ -5,7 +5,7 @@ GitHub Actions üzerinde periyodik (örn. her 10 dakikada bir) çalıştırılma
 üzere tasarlanmıştır. Tek bir tarama döngüsü çalıştırıp çıkar.
 ==============================================================================
 Gereksinimler:
-pip install requests pandas google-generativeai
+pip install requests pandas google-generativeai yfinance
 
 Ortam Değişkenleri (GitHub Actions Secrets üzerinden sağlanır):
 - SUPABASE_URL
@@ -18,6 +18,7 @@ import json
 import logging
 import requests
 import pandas as pd
+import yfinance as yf
 import google.generativeai as genai
 from typing import List, Dict, Any
 
@@ -27,6 +28,15 @@ from typing import List, Dict, Any
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+# Not: Binance'in kendi API'si, GitHub Actions gibi bulut sunucu IP'lerini
+# coğrafi kısıtlama (HTTP 451) ile engelliyor. Bu yüzden fiyat verisi
+# Yahoo Finance üzerinden çekiliyor (engellenmiyor, anahtar gerekmiyor).
+WATCHLIST = [
+    "BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "BNB-USD",
+    "XRP-USD", "ADA-USD", "DOGE-USD", "TRX-USD", "DOT-USD",
+    "LINK-USD", "MATIC-USD", "LTC-USD", "SHIB-USD", "ATOM-USD"
+]
 
 BINANCE_TICKER_24HR_URL = "https://api.binance.me/api/v3/ticker/24hr"
 
@@ -120,24 +130,54 @@ class SupabaseRestClient:
 
 
 # ------------------------------------------------------------------------------
-# 3. BİNANCE PUBLIC API: TOP 20 TRY PARİTELERİNİ ÇEKME
+# 3. YAHOO FINANCE: WATCHLIST FİYAT VERİSİNİ ÇEKME (TRY CİNSİNDEN)
 # ------------------------------------------------------------------------------
 def fetch_top_20_try_pairs() -> pd.DataFrame:
-    logger.info("Binance Public 24hr Ticker verisi çekiliyor...")
-    resp = requests.get(BINANCE_TICKER_24HR_URL, timeout=10)
-    resp.raise_for_status()
-    raw_data = resp.json()
+    logger.info("Yahoo Finance üzerinden piyasa verisi çekiliyor...")
 
-    df = pd.DataFrame(raw_data)
-    numeric_cols = ['lastPrice', 'priceChangePercent', 'volume', 'quoteVolume', 'highPrice', 'lowPrice']
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    try:
+        usdtry_hist = yf.Ticker("USDTRY=X").history(period="1d")
+        usd_try_rate = float(usdtry_hist['Close'].iloc[-1])
+    except Exception as e:
+        logger.warning(f"USD/TRY kuru çekilemedi, varsayılan 34.0 kullanılıyor: {e}")
+        usd_try_rate = 34.0
 
-    df_try = df[df['symbol'].str.endswith('TRY')].copy()
-    df_try = df_try[df_try['quoteVolume'] > 100000]
-    df_top20 = df_try.sort_values(by='quoteVolume', ascending=False).head(20).reset_index(drop=True)
+    rows = []
+    for ticker_symbol in WATCHLIST:
+        try:
+            tk = yf.Ticker(ticker_symbol)
+            hist = tk.history(period="2d")
+            if hist.empty or len(hist) < 1:
+                continue
 
-    logger.info(f"En yüksek hacimli {len(df_top20)} TRY paritesi çekildi.")
+            last_close_usd = float(hist['Close'].iloc[-1])
+            prev_close_usd = float(hist['Close'].iloc[-2]) if len(hist) >= 2 else last_close_usd
+            high_usd = float(hist['High'].iloc[-1])
+            low_usd = float(hist['Low'].iloc[-1])
+            volume = float(hist['Volume'].iloc[-1]) if 'Volume' in hist else 0.0
+
+            change_pct = ((last_close_usd - prev_close_usd) / prev_close_usd * 100) if prev_close_usd else 0.0
+            base_symbol = ticker_symbol.replace("-USD", "")
+
+            rows.append({
+                "symbol": f"{base_symbol}TRY",
+                "lastPrice": last_close_usd * usd_try_rate,
+                "priceChangePercent": change_pct,
+                "volume": volume,
+                "quoteVolume": volume * last_close_usd * usd_try_rate,
+                "highPrice": high_usd * usd_try_rate,
+                "lowPrice": low_usd * usd_try_rate,
+            })
+        except Exception as e:
+            logger.warning(f"{ticker_symbol} için veri çekilemedi: {e}")
+            continue
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    df_top20 = df.sort_values(by='quoteVolume', ascending=False).head(20).reset_index(drop=True)
+    logger.info(f"Yahoo Finance'ten {len(df_top20)} parite için veri çekildi (USD/TRY: {usd_try_rate:.2f}).")
     return df_top20
 
 
