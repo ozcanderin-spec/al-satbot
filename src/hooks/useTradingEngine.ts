@@ -284,6 +284,39 @@ export function useTradingEngine() {
   const scansRef = useRef(marketScans);
   scansRef.current = marketScans;
 
+  // Botun (GitHub Actions / trading_bot.py) Supabase'e yazdığı GERÇEK puanlar.
+  // "Piyasa Radarı" ekranının, tarayıcının kendi uydurma hesabını değil, botun
+  // gerçekten kullandığı puanı göstermesi için bu kullanılır.
+  const realMarketScansRef = useRef<Record<string, { ai_score: number; signal_type: string; scan_reason: string }>>({});
+
+  const refreshRealMarketScans = useCallback(async () => {
+    try {
+      const sb = getSupabase();
+      const { data, error } = await sb
+        .from('market_scans')
+        .select('symbol, ai_score, signal_type, scan_reason, created_at')
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (error || !data) return;
+
+      const map: Record<string, { ai_score: number; signal_type: string; scan_reason: string }> = {};
+      for (const row of data) {
+        // En son (ilk karşılaşılan, çünkü created_at desc sıralı) kaydı tut, eskisini ezme.
+        if (!map[row.symbol]) {
+          map[row.symbol] = {
+            ai_score: Number(row.ai_score),
+            signal_type: String(row.signal_type),
+            scan_reason: String(row.scan_reason || ''),
+          };
+        }
+      }
+      realMarketScansRef.current = map;
+    } catch (e) {
+      console.warn('Gerçek market_scans verisi alınamadı:', e);
+    }
+  }, []);
+
   const cashBalanceRef = useRef(cashBalance);
   cashBalanceRef.current = cashBalance;
 
@@ -653,6 +686,16 @@ export function useTradingEngine() {
           reason = `⚠️ ZİRVE ALARMI: Fiyat 24s zirvesine çok yakın (%2 içinde). Alım riskli bulunmuştur.`;
         }
 
+        // ÖNEMLİ: Eğer bot (trading_bot.py / GitHub Actions) bu sembol için gerçekten
+        // bir puan üretmişse, ekranda o GERÇEK puan gösterilir — yukarıdaki yerel/tahmini
+        // hesap sadece botun henüz taramadığı semboller için yedek olarak kullanılır.
+        const realScan = realMarketScansRef.current[sym];
+        if (realScan) {
+          score = realScan.ai_score;
+          signal = realScan.signal_type as typeof signal;
+          reason = `[Bot Kararı] ${realScan.scan_reason}`;
+        }
+
         updatedList.push({
           symbol: sym,
           price: lastPrice,
@@ -727,6 +770,7 @@ export function useTradingEngine() {
   useEffect(() => {
     handleLiveBinanceFetch(false);
     syncWithSupabase();
+    refreshRealMarketScans();
 
     // Setup Supabase Realtime channel for instant cross-device updates
     try {
@@ -739,6 +783,9 @@ export function useTradingEngine() {
         .on('postgres_changes', { event: '*', schema: 'public', table: 'bot_config' }, () => {
           setTimeout(() => syncWithSupabase(), 400);
         })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'market_scans' }, () => {
+          setTimeout(() => refreshRealMarketScans(), 400);
+        })
         .subscribe();
 
       return () => {
@@ -747,7 +794,7 @@ export function useTradingEngine() {
     } catch (e) {
       console.warn('Supabase realtime listener setup warning:', e);
     }
-  }, [handleLiveBinanceFetch, syncWithSupabase]);
+  }, [handleLiveBinanceFetch, syncWithSupabase, refreshRealMarketScans]);
 
   // Periodic Polling: continuously sync real Binance TR prices every 6 seconds
   useEffect(() => {
