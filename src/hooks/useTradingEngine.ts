@@ -668,17 +668,17 @@ export function useTradingEngine() {
         }
 
         let signal: 'STRONG_BUY' | 'BUY' | 'NEUTRAL' | 'SELL' = 'NEUTRAL';
-        let reason = 'Binance TR: Konsolidasyon bandı içinde yatay denge izleniyor.';
+        let reason = '[Tahmini] Binance TR: Konsolidasyon bandı içinde yatay denge izleniyor.';
 
         if (score >= 80) {
           signal = 'STRONG_BUY';
-          reason = `Binance TR Canlı: %${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)} değişim, ₺${(quoteVol / 1000000).toFixed(1)}M hacim, 15d ve 1s trend onaylı güçlü momentum.`;
+          reason = `[Tahmini] Binance TR Canlı: %${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)} değişim, ₺${(quoteVol / 1000000).toFixed(1)}M hacim, 15d ve 1s trend onaylı güçlü momentum.`;
         } else if (score >= 65) {
           signal = 'BUY';
-          reason = `Binance TR Canlı: EMA üzerinde pozitif akış; alıcı blokları derinlikte kuvvetli.`;
+          reason = `[Tahmini] Binance TR Canlı: EMA üzerinde pozitif akış; alıcı blokları derinlikte kuvvetli.`;
         } else if (score < 40) {
           signal = 'SELL';
-          reason = `Binance TR Canlı: Satış baskısı veya hacim zayıflaması; kâr realizasyonu riski yüksek.`;
+          reason = `[Tahmini] Binance TR Canlı: Satış baskısı veya hacim zayıflaması; kâr realizasyonu riski yüksek.`;
         }
 
         if (isAtPeak) {
@@ -906,20 +906,23 @@ export function useTradingEngine() {
   }, []);
 
   // Helper: Buy a new position at exact current scan price
-  const buyPosition = useCallback((scan: MarketScan, customAmount: number = 1500.0) => {
+  const buyPosition = useCallback((scan: MarketScan, customAmount?: number) => {
     const currentConfig = botConfigRef.current;
     if (currentConfig.emergency_stop) {
       setStatusMessage('🚨 HATA: Acil Stop aktif! Yeni pozisyon açılamaz.');
       return false;
     }
 
-    if (tradesRef.current.length >= currentConfig.max_open_positions) {
-      setStatusMessage(`⚠️ UYARI: Maksimum açık pozisyon limitine (${currentConfig.max_open_positions}) ulaşıldı!`);
-      return false;
-    }
+    // NOT: Sabit "maksimum pozisyon sayısı" kontrolü kasıtlı olarak kaldırıldı.
+    // Artık tek gerçek sınır kullanılabilir nakit — botun (trading_bot.py) mantığıyla
+    // birebir tutarlı olsun diye.
 
-    if (cashBalanceRef.current < customAmount) {
-      setStatusMessage(`⚠️ UYARI: Kullanılabilir bakiye yetersiz! Gereken: ₺${customAmount.toLocaleString('tr-TR')} - Mevcut: ₺${cashBalanceRef.current.toLocaleString('tr-TR')}`);
+    // Tutar belirtilmemişse, bakiyenin bir yüzdesi olarak hesapla (sabit ₺1.500 DEĞİL) —
+    // 100 TL'lik cüzdanla 10.000 TL'lik cüzdan orantısal olarak aynı davranır.
+    const amountToUse = customAmount ?? Math.max(100, +(cashBalanceRef.current * 0.05).toFixed(2));
+
+    if (cashBalanceRef.current < amountToUse) {
+      setStatusMessage(`⚠️ UYARI: Kullanılabilir bakiye yetersiz! Gereken: ₺${amountToUse.toLocaleString('tr-TR')} - Mevcut: ₺${cashBalanceRef.current.toLocaleString('tr-TR')}`);
       return false;
     }
 
@@ -930,17 +933,17 @@ export function useTradingEngine() {
       return false;
     }
 
-    // Cooldown check on recent losses (within the last 2 hours)
-    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+    // Cooldown check on recent losses (within the last 3 hours) — trading_bot.py ile aynı süre.
+    const cooldownStart = Date.now() - 3 * 60 * 60 * 1000;
     const recentLoss = closedTradesRef.current.some(t => 
       t.symbol === scan.symbol && 
       t.realized_pnl < 0 && 
       t.closed_at && 
-      Date.parse(t.closed_at) > twoHoursAgo
+      Date.parse(t.closed_at) > cooldownStart
     );
 
     if (recentLoss) {
-      setStatusMessage(`⚠️ ALIM ENGELLENDİ: ${scan.symbol} son 2 saat içinde zararla kapatıldığı için koruma algoritması (Son 2s Zarar Filtresi) alımı engelledi!`);
+      setStatusMessage(`⚠️ ALIM ENGELLENDİ: ${scan.symbol} son 3 saat içinde zararla kapatıldığı için koruma algoritması (Soğuma Süresi Filtresi) alımı engelledi!`);
       return false;
     }
 
@@ -952,11 +955,11 @@ export function useTradingEngine() {
     }
 
     // Calculate buy fee (0.1%):
-    const buyFee = customAmount * 0.001;
-    const netInvestment = customAmount - buyFee;
+    const buyFee = amountToUse * 0.001;
+    const netInvestment = amountToUse - buyFee;
 
     // Deduct cash
-    setCashBalance(prev => +(prev - customAmount).toFixed(2));
+    setCashBalance(prev => +(prev - amountToUse).toFixed(2));
 
     // Calculate token quantity with exact scan price
     const entryPrice = scan.price;
@@ -968,10 +971,10 @@ export function useTradingEngine() {
       entry_price: entryPrice,
       current_price: entryPrice, // Exact 1:1 match with scan price
       quantity: quantity,
-      total_amount: customAmount,
+      total_amount: amountToUse,
       current_value: +netInvestment.toFixed(2),
       unrealized_pnl: -buyFee, // show purchase fee impact immediately
-      unrealized_pnl_percent: +(-(buyFee / customAmount) * 100).toFixed(2),
+      unrealized_pnl_percent: +(-(buyFee / amountToUse) * 100).toFixed(2),
       is_active: true,
       scan_reason: scan.scan_reason || 'Kullanıcı/Bot tarafından açılan pozisyon.',
       created_at: new Date().toISOString(),
@@ -993,8 +996,8 @@ export function useTradingEngine() {
         price: entryPrice,
         entry_price: entryPrice,
         quantity: quantity,
-        cost_try: customAmount,
-        total_amount: customAmount,
+        cost_try: amountToUse,
+        total_amount: amountToUse,
         is_active: true,
         scan_reason: scan.scan_reason || 'Otonom AI Alım Emri',
         mode: currentConfig.mode,
@@ -1011,7 +1014,7 @@ export function useTradingEngine() {
     }
 
     setTrades(prev => [newTrade, ...prev]);
-    setStatusMessage(`✅ ALIM EMRİ GERÇEKLEŞTİ: ${scan.symbol} için ₺${customAmount.toLocaleString('tr-TR')} tutarında alım yapıldı. Giriş: ₺${entryPrice.toLocaleString('tr-TR', { minimumFractionDigits: 2 })}. %0.1 alım komisyonu (₺${buyFee.toFixed(2)}) düşüldü.`);
+    setStatusMessage(`✅ ALIM EMRİ GERÇEKLEŞTİ: ${scan.symbol} için ₺${amountToUse.toLocaleString('tr-TR')} tutarında alım yapıldı. Giriş: ₺${entryPrice.toLocaleString('tr-TR', { minimumFractionDigits: 2 })}. %0.1 alım komisyonu (₺${buyFee.toFixed(2)}) düşüldü.`);
     return true;
   }, []);
 
