@@ -294,8 +294,8 @@ export function useTradingEngine() {
       const sb = getSupabase();
       const { data, error } = await sb
         .from('market_scans')
-        .select('symbol, ai_score, signal_type, scan_reason, created_at')
-        .order('created_at', { ascending: false })
+        .select('symbol, ai_score, signal_type, scan_reason, scanned_at')
+        .order('scanned_at', { ascending: false })
         .limit(100);
 
       if (error || !data) return;
