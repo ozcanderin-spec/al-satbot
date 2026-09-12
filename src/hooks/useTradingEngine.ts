@@ -72,7 +72,7 @@ export function useTradingEngine() {
         // Force migration of stop_loss_percent to 1.2 as requested by user
         return {
           ...parsed,
-          stop_loss_percent: 1.2,
+          stop_loss_percent: 1.25,
         };
       } catch (e) {
         // Fallback
@@ -84,7 +84,7 @@ export function useTradingEngine() {
       max_open_positions: 3,
       risk_per_trade_percent: 5.0,
       min_ai_score_to_buy: 80,
-      stop_loss_percent: 1.2,
+      stop_loss_percent: 1.25,
       take_profit_percent: 5.0,
       updated_at: new Date().toISOString(),
     };
@@ -392,8 +392,8 @@ export function useTradingEngine() {
       // Calculate the peak profit % reached ever so far:
       const peakProfitPct = +(((netPeakValue - trade.total_amount) / trade.total_amount) * 100).toFixed(2);
 
-      // Trailing stop loss activation threshold is 2.8% net profit
-      const isTrailingActive = peakProfitPct >= 2.8;
+      // Trailing stop loss activation threshold is 3.0% net profit
+      const isTrailingActive = peakProfitPct >= 3.0;
 
       // Drawdown % from highest peak net value:
       const drawdownPct = +(((netPeakValue - liveValue) / netPeakValue) * 100).toFixed(2);
@@ -428,11 +428,10 @@ export function useTradingEngine() {
 
       if (shouldTriggerSL) {
         triggeredPositions.push({ trade: updatedTrade, reason: 'STOP_LOSS' });
-      } 
-      // 2. Kâr Al (Take-Profit) Koşulu:
-      else if (pnlPct >= currentConfig.take_profit_percent) {
-        triggeredPositions.push({ trade: updatedTrade, reason: 'TAKE_PROFIT' });
-      } 
+      }
+      // NOT: Sabit "Kâr Al" (Take-Profit) tetikleyicisi KASITLI olarak kaldırıldı.
+      // Kâr %3'ü geçince iz süren stop devreye giriyor ve pozisyon, fiyat gerçekten
+      // dönene kadar açık kalıp yükselişten olabildiğince faydalanmaya çalışıyor.
       else {
         remainingTrades.push(updatedTrade);
 
