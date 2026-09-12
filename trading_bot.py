@@ -31,6 +31,7 @@ import pandas as pd
 import yfinance as yf
 import google.generativeai as genai
 from typing import List, Dict, Any, Set
+from collections import Counter
 
 # ------------------------------------------------------------------------------
 # 1. YAPILANDIRMA & ORTAM DEĞİŞKENLERİ
@@ -621,7 +622,11 @@ def run_scan_cycle(client: SupabaseRestClient):
     market_regime = get_market_regime()
     ai_evaluations = analyze_markets_with_gemini(shortlist, market_regime)
     ai_dict = {item["symbol"]: item for item in ai_evaluations if "symbol" in item}
-    effective_min_score = min_ai_score + 10 if market_regime == "DÜŞÜŞ" else min_ai_score
+    # NOT: Eşiği burada ayrıca yükseltmiyoruz — Gemini'ye zaten DÜŞÜŞ rejiminde
+    # 70'in üzerine çıkmaması talimatı verildi (yukarıdaki prompt). İkisini üst
+    # üste uygulamak (hem tavan koymak hem eşiği yükseltmek) alım işlemini
+    # matematiksel olarak imkansız hale getiriyordu.
+    effective_min_score = min_ai_score
 
     records_to_upsert = []
     market_scan_payload = []
@@ -657,25 +662,31 @@ def run_scan_cycle(client: SupabaseRestClient):
         logger.info("Kullanılabilir nakit minimum işlem tutarının altında, yeni alım yapılmayacak.")
         return
 
-    # Çeşitlendirme: aynı kategoriden tekrar alma, soğuma süresindeki sembolleri atla
-    held_categories = {get_category(s) for s in held_symbols}
+    # Çeşitlendirme: her kategoriden makul bir üst sınıra kadar izin ver
+    # (eskisi gibi "kategori başına sadece 1" değil — ALT kategorisi coinlerin
+    # büyük çoğunluğunu kapsadığı için bu, botu neredeyse tamamen durduruyordu).
+    MAX_PER_CATEGORY = {"MAJOR": 2, "ALT": 5, "STABLE": 0}
+
+    held_category_counts = Counter(get_category(s) for s in held_symbols)
+
     candidates = [
         r for r in records_to_upsert
         if r["ai_score"] >= effective_min_score
         and r["symbol"] not in held_symbols
         and r["symbol"] not in losing_cooldown_symbols
         and get_category(r["symbol"]) != "STABLE"
-        and get_category(r["symbol"]) not in held_categories
+        and held_category_counts[get_category(r["symbol"])] < MAX_PER_CATEGORY.get(get_category(r["symbol"]), 3)
     ]
     candidates.sort(key=lambda r: r["ai_score"], reverse=True)
 
-    selected_categories: set = set()
+    selected_category_counts = Counter(held_category_counts)
     final_candidates = []
     for c in candidates:
         cat = get_category(c["symbol"])
-        if cat in selected_categories:
+        limit = MAX_PER_CATEGORY.get(cat, 3)
+        if selected_category_counts[cat] >= limit:
             continue
-        selected_categories.add(cat)
+        selected_category_counts[cat] += 1
         final_candidates.append(c)
 
     remaining_cash = available_cash
