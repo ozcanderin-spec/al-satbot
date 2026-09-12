@@ -38,6 +38,19 @@ WATCHLIST = [
     "LINK-USD", "MATIC-USD", "LTC-USD", "SHIB-USD", "ATOM-USD"
 ]
 
+# Çeşitlendirme (diversification) için kaba kategori etiketleri.
+# Aynı anda aynı kategoriden birden fazla pozisyon açılmasını engellemek için kullanılır.
+MAJOR_SYMBOLS = {"BTCTRY", "ETHTRY", "BNBTRY", "SOLTRY", "XRPTRY", "ADATRY"}
+STABLE_SYMBOLS = {"USDTTRY", "USDCTRY", "BUSDTRY", "DAITRY", "FDUSDTRY"}
+
+
+def get_category(symbol: str) -> str:
+    if symbol in STABLE_SYMBOLS:
+        return "STABLE"
+    if symbol in MAJOR_SYMBOLS:
+        return "MAJOR"
+    return "ALT"
+
 BINANCE_TICKER_24HR_URL = "https://api.binance.me/api/v3/ticker/24hr"
 
 logging.basicConfig(
@@ -114,6 +127,22 @@ class SupabaseRestClient:
             requests.patch(url, headers=self.headers, params={"id": f"eq.{trade_id}"}, json=payload, timeout=10)
         except Exception as e:
             logger.warning(f"Zirve fiyat güncellenemedi ({trade_id}): {e}")
+
+    def get_recent_closed_trades(self, limit: int = 50) -> List[Dict[str, Any]]:
+        url = f"{self.base_url}/rest/v1/trades"
+        params = {
+            "select": "symbol,realized_pnl,closed_at",
+            "is_active": "eq.false",
+            "order": "closed_at.desc",
+            "limit": str(limit),
+        }
+        try:
+            resp = requests.get(url, headers=self.headers, params=params, timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.warning(f"Kapanmış işlemler okunamadı: {e}")
+            return []
 
     def close_trade(self, trade_id: str, exit_price: float, realized_pnl: float, reason: str) -> bool:
         url = f"{self.base_url}/rest/v1/trades"
@@ -263,6 +292,98 @@ def fetch_top_20_try_pairs_yahoo_fallback() -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------------------
+# 5. TEKNİK GÖSTERGELER (RSI / EMA / Hacim Trendi) VE PİYASA REJİMİ
+# ------------------------------------------------------------------------------
+def fetch_klines(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFrame:
+    """Belirli bir sembol için mum (kline) verisi çeker. Kapanış fiyatı ve hacim döner."""
+    for base_url in ["https://data-api.binance.vision", "https://api.binance.com"]:
+        try:
+            url = f"{base_url}/api/v3/klines"
+            resp = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10)
+            resp.raise_for_status()
+            raw = resp.json()
+            df = pd.DataFrame(raw, columns=[
+                "open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_volume", "trades", "taker_base", "taker_quote", "ignore"
+            ])
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+            return df
+        except Exception as e:
+            logger.warning(f"{symbol} için kline verisi çekilemedi ({base_url}): {e}")
+            continue
+    return pd.DataFrame()
+
+
+def compute_rsi(closes: pd.Series, period: int = 14) -> float:
+    if len(closes) < period + 1:
+        return 50.0
+    delta = closes.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=period).mean().iloc[-1]
+    avg_loss = loss.rolling(window=period).mean().iloc[-1]
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
+
+def compute_indicators(symbol: str) -> Dict[str, Any]:
+    """Bir sembol için RSI(14), EMA20/EMA50 trendi ve hacim oranını hesaplar."""
+    df = fetch_klines(symbol, interval="1h", limit=60)
+    if df.empty or len(df) < 21:
+        return {"rsi": 50.0, "trend": "BİLİNMİYOR", "volume_ratio": 1.0}
+
+    closes = df["close"]
+    volumes = df["volume"]
+
+    rsi = compute_rsi(closes, 14)
+    ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50 = closes.ewm(span=50, adjust=False).mean().iloc[-1] if len(closes) >= 50 else closes.mean()
+    last_close = closes.iloc[-1]
+
+    if last_close > ema20 > ema50:
+        trend = "GÜÇLÜ_YÜKSELİŞ"
+    elif last_close > ema20:
+        trend = "YÜKSELİŞ"
+    elif last_close < ema20 < ema50:
+        trend = "GÜÇLÜ_DÜŞÜŞ"
+    else:
+        trend = "DÜŞÜŞ"
+
+    recent_volume = volumes.iloc[-1]
+    avg_volume = volumes.iloc[-21:-1].mean() if len(volumes) >= 21 else volumes.mean()
+    volume_ratio = round(recent_volume / avg_volume, 2) if avg_volume else 1.0
+
+    return {"rsi": rsi, "trend": trend, "volume_ratio": volume_ratio}
+
+
+def get_market_regime() -> str:
+    """BTC'nin 4 saatlik trendine bakarak genel piyasa rejimini belirler.
+    Düşüş rejiminde yeni alımlar durdurulur veya eşik yükseltilir."""
+    df = fetch_klines("BTCTRY", interval="4h", limit=60)
+    if df.empty or len(df) < 50:
+        logger.warning("Piyasa rejimi belirlenemedi (veri yetersiz), varsayılan NÖTR kabul ediliyor.")
+        return "NÖTR"
+
+    closes = df["close"]
+    ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50 = closes.ewm(span=50, adjust=False).mean().iloc[-1]
+    last_close = closes.iloc[-1]
+
+    if last_close > ema20 > ema50:
+        regime = "YÜKSELİŞ"
+    elif last_close < ema20 < ema50:
+        regime = "DÜŞÜŞ"
+    else:
+        regime = "NÖTR"
+
+    logger.info(f"Genel piyasa rejimi (BTC 4s trend): {regime}")
+    return regime
+
+
+# ------------------------------------------------------------------------------
 # 5. POZİSYON İZLEME: STOP-LOSS / TAKE-PROFIT / İZ SÜREN STOP
 # ------------------------------------------------------------------------------
 # Not: Bu eşikler web uygulamasındaki (useTradingEngine.ts) mantıkla birebir
@@ -340,35 +461,78 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
 
 
 # ------------------------------------------------------------------------------
-# 6. GEMINI KARAR VE PUANLAMA MOTORU
+# 7. PERFORMANS GÜNLÜĞÜ (basit istatistik özeti, her döngüde loglanır)
 # ------------------------------------------------------------------------------
-def analyze_markets_with_gemini(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    logger.info("Gemini Algo-Trading Karar Motoru çalıştırılıyor...")
+def log_performance_summary(client: SupabaseRestClient):
+    closed = client.get_recent_closed_trades(limit=50)
+    if not closed:
+        logger.info("--- Performans özeti: henüz kapanmış işlem yok ---")
+        return
+
+    pnls = [float(t["realized_pnl"]) for t in closed if t.get("realized_pnl") is not None]
+    if not pnls:
+        return
+
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    win_rate = (len(wins) / len(pnls)) * 100 if pnls else 0
+    avg_pnl = sum(pnls) / len(pnls)
+    total_pnl = sum(pnls)
+
+    logger.info(
+        f"--- Performans özeti (son {len(pnls)} kapanmış işlem): "
+        f"Kazanma oranı %{win_rate:.1f} | Ortalama PnL ₺{avg_pnl:.2f} | Toplam PnL ₺{total_pnl:.2f} ---"
+    )
+
+
+# ------------------------------------------------------------------------------
+# 8. GEMINI KARAR VE PUANLAMA MOTORU
+# ------------------------------------------------------------------------------
+def analyze_markets_with_gemini(df: pd.DataFrame, market_regime: str) -> List[Dict[str, Any]]:
+    logger.info("Gemini Algo-Trading Karar Motoru çalıştırılıyor (teknik göstergelerle)...")
 
     market_summary = []
     for _, row in df.iterrows():
+        symbol = row['symbol']
+        indicators = compute_indicators(symbol)
         market_summary.append({
-            "symbol": row['symbol'],
+            "symbol": symbol,
             "last_price": round(float(row['lastPrice']), 4),
             "change_24h_percent": round(float(row['priceChangePercent']), 2),
             "volume_try": round(float(row['quoteVolume']), 0),
-            "high_24h": round(float(row['highPrice']), 4),
-            "low_24h": round(float(row['lowPrice']), 4)
+            "rsi_14": indicators["rsi"],
+            "ema_trend": indicators["trend"],
+            "volume_vs_avg_ratio": indicators["volume_ratio"],
         })
 
     prompt = f"""
-Sen profesyonel bir Kripto Para Algo-Trading Karar Motorusun.
-Aşağıdaki Binance TR en yüksek hacimli 20 TRY paritesinin 24 saatlik fiyat, değişim yüzdesi, hacim ve aralık verilerini analiz et.
+Sen kural tabanlı çalışan bir Kripto Para Teknik Analiz Motorusun. Kendi sezgine göre TAHMİN ETME;
+sadece aşağıda verilen GERÇEK, HESAPLANMIŞ göstergeleri belirtilen kurallara göre birleştirerek puanla.
 
-HER PARİTE İÇİN:
-1. "ai_score": 0 ile 100 arasında tam sayı güven skoru.
-2. "signal_type": "STRONG_BUY" (skor >= 80), "BUY" (skor >= 65), "NEUTRAL" (skor 40-64), "SELL" (skor < 40).
-3. "scan_reason": Türkçe, 1-2 cümlelik teknik ve hacimsel gerekçe.
+GENEL PİYASA REJİMİ (BTC 4 saatlik trend): {market_regime}
+- Rejim DÜŞÜŞ ise: hiçbir pariteye 70'in üzerinde puan verme (genel piyasa riskli).
+- Rejim NÖTR ise: en fazla 85 puan ver.
+- Rejim YÜKSELİŞ ise: normal puanlama kurallarını uygula.
 
-Piyasa Verileri:
+HER PARİTE İÇİN PUANLAMA KURALLARI (0-100 arası taban puan 50'den başla):
+- rsi_14 < 30 (aşırı satım, toparlanma ihtimali): +15 puan
+- rsi_14 > 70 (aşırı alım, risk): -15 puan
+- ema_trend == "GÜÇLÜ_YÜKSELİŞ": +20 puan
+- ema_trend == "YÜKSELİŞ": +10 puan
+- ema_trend == "GÜÇLÜ_DÜŞÜŞ": -20 puan
+- ema_trend == "DÜŞÜŞ": -10 puan
+- volume_vs_avg_ratio > 1.5 (ortalamanın üstünde ilgi): +10 puan
+- volume_vs_avg_ratio < 0.7 (zayıf ilgi): -10 puan
+- change_24h_percent > 15 (aşırı ısınmış, geri çekilme riski): -10 puan
+
+Puanı 0-100 aralığında sınırla. Sonra:
+"signal_type": "STRONG_BUY" (skor >= 80), "BUY" (skor >= 65), "NEUTRAL" (skor 40-64), "SELL" (skor < 40).
+"scan_reason": Türkçe, hangi göstergelerin puana nasıl katkı yaptığını özetleyen 1-2 cümle.
+
+Piyasa Verileri (gerçek hesaplanmış göstergelerle):
 {json.dumps(market_summary, indent=2)}
 
-SADECE aşağıdaki JSON formatında geçerli bir liste döndür:
+SADECE aşağıdaki JSON formatında geçerli bir liste döndür, başka hiçbir metin ekleme:
 [
   {{"symbol": "BTCTRY", "ai_score": 85, "signal_type": "STRONG_BUY", "scan_reason": "..."}}
 ]
@@ -417,8 +581,12 @@ def run_scan_cycle(client: SupabaseRestClient):
         logger.error("Binance verisi boş geldi, döngü atlanıyor.")
         return
 
-    ai_evaluations = analyze_markets_with_gemini(df_top20)
+    market_regime = get_market_regime()
+    ai_evaluations = analyze_markets_with_gemini(df_top20, market_regime)
     ai_dict = {item["symbol"]: item for item in ai_evaluations if "symbol" in item}
+
+    # Düşüş rejiminde ek güvenlik katmanı: prompt'taki kural yetmezse diye eşiği yükselt.
+    effective_min_score = min_ai_score + 10 if market_regime == "DÜŞÜŞ" else min_ai_score
 
     records_to_upsert = []      # İç mantık için (alım kararı vb.)
     market_scan_payload = []    # Supabase 'market_scans' tablosunun gerçek sütun adlarıyla
@@ -452,6 +620,8 @@ def run_scan_cycle(client: SupabaseRestClient):
     if not scans_ok:
         raise RuntimeError("market_scans tablosuna yazma başarısız oldu (yukarıdaki hata mesajına bakın).")
 
+    log_performance_summary(client)
+
     # --- Otonom Sanal Alım Mantığı ---
     if mode != "VIRTUAL":
         logger.info("Mod VIRTUAL değil, otomatik alım bu script tarafından yapılmıyor (güvenlik).")
@@ -459,17 +629,35 @@ def run_scan_cycle(client: SupabaseRestClient):
 
     open_positions = client.get_open_positions()
     held_symbols = {p["symbol"] for p in open_positions}
-    logger.info(f"Açık pozisyon sayısı: {len(open_positions)}/{max_positions}, semboller: {held_symbols}")
+    held_categories = {get_category(s) for s in held_symbols}
+    logger.info(f"Açık pozisyon sayısı: {len(open_positions)}/{max_positions}, semboller: {held_symbols}, kategoriler: {held_categories}")
 
     if len(open_positions) >= max_positions:
         logger.info("Maksimum açık pozisyon sayısına ulaşıldı, yeni alım yapılmayacak.")
         return
 
-    candidates = [r for r in records_to_upsert if r["ai_score"] >= min_ai_score and r["symbol"] not in held_symbols]
+    # Çeşitlendirme kuralı: stablecoin'leri hiç alma, ve zaten elde olan kategoriden tekrar alma.
+    candidates = [
+        r for r in records_to_upsert
+        if r["ai_score"] >= effective_min_score
+        and r["symbol"] not in held_symbols
+        and get_category(r["symbol"]) != "STABLE"
+        and get_category(r["symbol"]) not in held_categories
+    ]
     candidates.sort(key=lambda r: r["ai_score"], reverse=True)
 
+    # Aynı döngüde birden fazla aday seçilirse, aralarında da kategori tekrarını engelle.
+    selected_categories: set = set()
+    final_candidates = []
+    for c in candidates:
+        cat = get_category(c["symbol"])
+        if cat in selected_categories:
+            continue
+        selected_categories.add(cat)
+        final_candidates.append(c)
+
     slots_available = max_positions - len(open_positions)
-    for candidate in candidates[:slots_available]:
+    for candidate in final_candidates[:slots_available]:
         amount_try = 1500.0
         buy_fee = amount_try * 0.001
         net_investment = amount_try - buy_fee
