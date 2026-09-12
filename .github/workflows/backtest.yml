@@ -1,0 +1,22 @@
+name: Strateji Backtest (Elle Çalıştırılır)
+
+on:
+  workflow_dispatch: {}   # Sadece Actions sekmesinden elle tetiklenir, otomatik çalışmaz
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Gereksinimleri kur
+        run: pip install requests pandas
+
+      - name: Backtest'i çalıştır
+        run: python backtest.py
