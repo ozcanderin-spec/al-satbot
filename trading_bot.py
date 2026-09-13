@@ -552,14 +552,22 @@ GENEL PİYASA REJİMİ (BTC 4 saatlik trend): {market_regime}
 - Rejim NÖTR ise: en fazla 85 puan ver.
 - Rejim YÜKSELİŞ ise: normal puanlama kurallarını uygula.
 
-HER PARİTE İÇİN PUANLAMA KURALLARI (taban puan 50'den başla):
-- rsi_14 < 30: +15 puan | rsi_14 > 70: -15 puan
-- ema_trend == "GÜÇLÜ_YÜKSELİŞ": +20 | "YÜKSELİŞ": +10 | "GÜÇLÜ_DÜŞÜŞ": -20 | "DÜŞÜŞ": -10
-- volume_vs_avg_ratio > 1.5: +10 | < 0.7: -10
-- change_24h_percent > 15: -10 (aşırı ısınmış)
-- pct_below_30d_high < 3 (yani 30 günlük ZİRVEYE çok yakın): -20 puan (zirveden alımı önle)
-- pct_below_30d_high 3-10 arası: -5 puan
-- pct_below_30d_high > 25 (zirveden ciddi uzak, toparlanma potansiyeli): +5 puan
+HER PARİTE İÇİN PUANLAMA KURALLARI (taban puan 50'den başla).
+NOT: Bu ağırlıklar, 364 coin / 6 aylık / 56.092 gün-gözlemlik gerçek geçmiş veri
+üzerinde yapılan "taban oran karşılaştırmalı" (lift) analize dayanır — klasik
+"aşırı satımda al, aşırı alımda sat" mantığı DEĞİL, gerçek istatistiksel bulgu
+kullanılmıştır:
+- rsi_14 > 70 (momentum devam ediyor, gerçek veride LIFT 2.28x — EN GÜÇLÜ sinyal): +18 puan
+- rsi_14 60-70 arası (LIFT 1.14x, hafif pozitif): +5 puan
+- rsi_14 30-40 arası (LIFT 0.74x, hafif negatif): -8 puan
+- rsi_14 < 30 (gerçek veride öngörü değeri neredeyse yok, LIFT 0.94x): 0 puan (ne ödül ne ceza)
+- ema_trend == "GÜÇLÜ_YÜKSELİŞ" (LIFT 1.48x): +20 | "YÜKSELİŞ" (LIFT ~1.0x, nötr): +3
+- ema_trend == "GÜÇLÜ_DÜŞÜŞ" (LIFT 0.76x): -15 | "DÜŞÜŞ" (LIFT 0.94x, hafif negatif): -3
+- volume_vs_avg_ratio > 1.5 (LIFT 1.74x — güçlü gerçek sinyal): +15 puan
+- volume_vs_avg_ratio < 1.0 (LIFT ~0.83x, hafif negatif, iki taraf da benzer): -5 puan
+- change_24h_percent > 15: -10 (aşırı ısınmış, kısa vadeli geri çekilme riski)
+- pct_below_30d_high < 3 (30 günlük ZİRVEYE çok yakın; gerçek veride LIFT sadece 0.90x, zayıf bir sinyal): -5 puan (eskisi -20'ydi, veri güçlü bir etki göstermediği için azaltıldı)
+- pct_below_30d_high diğer durumlarda: puan etkisi yok (gerçek veri anlamlı bir fark göstermedi)
 
 Puanı 0-100 aralığında sınırla. Sonra:
 "signal_type": "STRONG_BUY" (>=80), "BUY" (>=65), "NEUTRAL" (40-64), "SELL" (<40).
