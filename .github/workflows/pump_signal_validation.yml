@@ -1,0 +1,23 @@
+name: Pump Sinyal Doğrulama (Elle Çalıştırılır)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Gereksinimleri kur
+        run: pip install requests pandas numpy
+
+      - name: Doğrulamayı çalıştır
+        run: python pump_signal_validation.py
