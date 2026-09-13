@@ -1,13 +1,12 @@
-name: Pozisyon İzleme (5 dakikada bir)
+name: Pump Örüntü Analizi (Elle Çalıştırılır)
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch: {}
 
 jobs:
-  monitor:
+  analyze:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Repoyu indir
         uses: actions/checkout@v4
@@ -18,11 +17,7 @@ jobs:
           python-version: '3.11'
 
       - name: Gereksinimleri kur
-        run: pip install requests pandas google-generativeai yfinance
+        run: pip install requests pandas
 
-      - name: İzlemeyi çalıştır
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python monitor.py
+      - name: Analizi çalıştır
+        run: python pump_pattern_analysis.py
