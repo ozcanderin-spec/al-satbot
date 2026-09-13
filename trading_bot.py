@@ -317,8 +317,11 @@ def shortlist_for_detailed_analysis(universe: pd.DataFrame, excluded_symbols: Se
     df = df[df['symbol'].apply(lambda s: get_category(s) != "STABLE")]
 
     vol_norm = (df['quoteVolume'] / df['quoteVolume'].max()).fillna(0) if df['quoteVolume'].max() else 0
-    change_norm = (df['priceChangePercent'].abs() / df['priceChangePercent'].abs().max()).fillna(0) if len(df) else 0
-    df['quick_score'] = vol_norm * 0.6 + change_norm * 0.4
+    # NOT: Burada .abs() KULLANMIYORUZ — amaç yükselen coinleri öne çıkarmak.
+    # abs() kullanılsaydı çöken coinler de "ilginç" sayılıp listeyi kirletirdi.
+    positive_change = df['priceChangePercent'].clip(lower=0)
+    change_norm = (positive_change / positive_change.max()).fillna(0) if positive_change.max() else 0
+    df['quick_score'] = vol_norm * 0.5 + change_norm * 0.5
 
     shortlisted = df.sort_values('quick_score', ascending=False).head(MAX_DETAILED_ANALYSIS).reset_index(drop=True)
     logger.info(f"Detaylı analiz için kısa liste: {len(shortlisted)} parite.")
@@ -648,6 +651,10 @@ def run_scan_cycle(client: SupabaseRestClient):
     scans_ok = client.upsert_market_scans(market_scan_payload)
     if not scans_ok:
         raise RuntimeError("market_scans tablosuna yazma başarısız oldu.")
+
+    sorted_scores = sorted(records_to_upsert, key=lambda r: r["ai_score"], reverse=True)
+    score_lines = "\n".join(f"  {r['symbol']}: {r['ai_score']} ({r['signal_type']})" for r in sorted_scores)
+    logger.info(f"--- Bu döngüdeki tüm puanlar (yüksekten düşüğe) ---\n{score_lines}")
 
     log_performance_summary(client)
 
