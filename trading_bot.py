@@ -76,7 +76,7 @@ if not SUPABASE_URL or not SUPABASE_KEY or not GEMINI_API_KEY:
     raise SystemExit(1)
 
 genai.configure(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-1.5-flash"
+MODEL_NAME = "gemini-flash-latest"  # Sabit sürüm yerine takma ad — Google modeli değiştirse bile kırılmaz
 model = genai.GenerativeModel(model_name=MODEL_NAME, generation_config={"response_mime_type": "application/json"})
 
 
@@ -146,7 +146,7 @@ class SupabaseRestClient:
             logger.warning(f"Soğuma süresi kontrolü için veri okunamadı: {e}")
             return set()
 
-        cutoff = pd.Timestamp.utcnow() - pd.Timedelta(hours=cooldown_hours)
+        cutoff = pd.Timestamp.now('UTC') - pd.Timedelta(hours=cooldown_hours)
         losing = set()
         for r in rows:
             try:
@@ -191,7 +191,7 @@ class SupabaseRestClient:
         payload = {
             "is_active": False, "status": "FILLED", "exit_price": exit_price,
             "realized_pnl": realized_pnl, "notes": reason,
-            "closed_at": pd.Timestamp.utcnow().isoformat(),
+            "closed_at": pd.Timestamp.now('UTC').isoformat(),
         }
         try:
             resp = requests.patch(url, headers=self.headers, params={"id": f"eq.{trade_id}"}, json=payload, timeout=10)
@@ -583,11 +583,22 @@ SADECE aşağıdaki JSON formatında geçerli bir liste döndür, başka hiçbir
 """
     try:
         response = model.generate_content(prompt)
+    except Exception as e:
+        # API çağrısının kendisi başarısız oldu (örn. model bulunamadı, kota, ağ hatası).
+        # Bunu SESSİZCE geçmiyoruz — tüm coinlerin sahte "50" puanıyla günlerce
+        # dolaşmasına yol açan asıl sorun buydu. Artık çalışma burada durup
+        # Actions'ta kırmızı görünecek, böylece hemen fark edilir.
+        logger.error(f"Gemini API ÇAĞRISI BAŞARISIZ: {e}")
+        raise RuntimeError(f"Gemini API çağrısı başarısız oldu, döngü durduruluyor: {e}") from e
+
+    try:
         ai_results = json.loads(response.text)
         logger.info(f"Gemini {len(ai_results)} parite için analiz tamamladı.")
         return ai_results
     except Exception as e:
-        logger.error(f"Gemini analiz/parse hatası: {e}")
+        # Sadece JSON ayrıştırma hatasıysa (API çalıştı ama format bozuktu),
+        # bu daha ufak/geçici bir sorun olabilir — döngüyü tamamen durdurmuyoruz.
+        logger.error(f"Gemini yanıtı ayrıştırılamadı (API çalıştı ama format bozuk): {e}")
         return []
 
 
