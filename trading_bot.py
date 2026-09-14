@@ -55,8 +55,8 @@ BINANCE_TICKER_URLS = [
 ]
 
 # --- Strateji sabitleri (kullanıcı talebine göre ayarlanmıştır) ---
-STOP_LOSS_PERCENT_DEFAULT = 1.25       # Sabit stop-loss (kâr %3'e ulaşana kadar)
-TRAILING_ACTIVATION_PCT = 3.0          # Bu kâr yüzdesinden sonra iz süren stop devreye girer
+STOP_LOSS_PERCENT_DEFAULT = 2.0        # Sabit stop-loss (kâr %3.25'i geçene kadar)
+TRAILING_ACTIVATION_PCT = 3.25         # Kâr %3.25'i geçtiğinde iz süren stop devreye girer
 FEE_RATE = 0.001                        # Binance standart %0.1 komisyon
 MAX_UNIVERSE_SIZE = 250                 # Ucuz taramada bakılacak azami parite sayısı
 MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detaylı analiz edilecek azami sayı
@@ -456,7 +456,7 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
         gross_peak_value = quantity * live_highest
         net_peak_value = gross_peak_value * (1 - FEE_RATE)
         peak_profit_pct = ((net_peak_value - total_amount) / total_amount) * 100
-        is_trailing_active = peak_profit_pct >= TRAILING_ACTIVATION_PCT
+        is_trailing_active = peak_profit_pct > TRAILING_ACTIVATION_PCT
         drawdown_pct = ((net_peak_value - live_value) / net_peak_value) * 100 if net_peak_value else 0
 
         should_close = (drawdown_pct >= stop_loss_percent) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
@@ -466,7 +466,7 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
             client.close_trade(trade["id"], exit_price=live_price, realized_pnl=round(pnl, 2), reason=reason)
         else:
             if live_highest > previous_highest:
-                trailing_stop_price = round(live_highest * (1 - stop_loss_percent / 100), 8) if is_trailing_active else None
+                trailing_stop_price = round(live_highest * (1 - 1.2 / 100), 8) if is_trailing_active else None
                 client.update_trade_peak(trade["id"], live_highest, trailing_stop_price)
             logger.info(f"{symbol}: PnL %{pnl_pct:.2f} | Zirve kâr %{peak_profit_pct:.2f} | Trailing aktif: {is_trailing_active} — açık kalıyor.")
 
