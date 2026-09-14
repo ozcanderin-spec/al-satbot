@@ -219,12 +219,12 @@ class SupabaseRestClient:
             logger.error(f"market_scans isteği başarısız: {e}")
             return False
 
-    def insert_trade(self, record: Dict[str, Any]) -> bool:
+    def insert_trade(self, record: Dict[str, Any], position_pct: float = 0) -> bool:
         url = f"{self.base_url}/rest/v1/trades"
         try:
             response = requests.post(url, headers=self.headers, json=record, timeout=15)
             if response.status_code in (200, 201):
-                logger.info(f"YENİ ALIM: {record['symbol']} - ₺{record['cost_try']:.2f} (%{record.get('_position_pct', 0):.1f})")
+                logger.info(f"YENİ ALIM: {record['symbol']} - ₺{record['cost_try']:.2f} (%{position_pct:.1f})")
                 return True
             logger.error(f"trades yazma hatası ({response.status_code}): {response.text}")
             return False
@@ -725,15 +725,15 @@ def run_scan_cycle(client: SupabaseRestClient):
         net_investment = amount_try - buy_fee
         entry_price = candidate["price"]
         quantity = net_investment / entry_price if entry_price else 0
+        position_pct = (amount_try / available_cash * 100) if available_cash else 0
 
         trade_record = {
             "symbol": candidate["symbol"], "side": "BUY", "status": "FILLED",
             "price": entry_price, "entry_price": entry_price, "quantity": quantity,
             "cost_try": amount_try, "total_amount": amount_try, "is_active": True,
             "scan_reason": candidate["scan_reason"], "mode": mode, "realized_pnl": 0,
-            "_position_pct": (amount_try / available_cash * 100) if available_cash else 0,
         }
-        if client.insert_trade(trade_record):
+        if client.insert_trade(trade_record, position_pct=position_pct):
             remaining_cash -= amount_try
 
     logger.info("Döngü başarıyla tamamlandı.")
