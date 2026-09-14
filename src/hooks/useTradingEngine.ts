@@ -419,20 +419,15 @@ export function useTradingEngine() {
         trend_1h: cachedTrend ? cachedTrend.trend_1h : trade.trend_1h,
       };
 
-      // 1. Stop-Loss Trigger Determination:
-      // If trailing is active (reached 2.8%+ profit): trigger on drawdown from peak
-      // If trailing is not active: trigger on standard/static stop-loss from entry amount
-      const shouldTriggerSL = isTrailingActive 
-        ? (drawdownPct >= activeSLPercent)
-        : (pnlPct <= -currentConfig.stop_loss_percent);
-
-      if (shouldTriggerSL) {
-        triggeredPositions.push({ trade: updatedTrade, reason: 'STOP_LOSS' });
-      }
-      // NOT: Sabit "Kâr Al" (Take-Profit) tetikleyicisi KASITLI olarak kaldırıldı.
-      // Kâr %3'ü geçince iz süren stop devreye giriyor ve pozisyon, fiyat gerçekten
-      // dönene kadar açık kalıp yükselişten olabildiğince faydalanmaya çalışıyor.
-      else {
+      // NOT: Tarayıcının kendi başına pozisyon KAPATMASI kasıtlı olarak kaldırıldı.
+      // Artık kapatma kararı (stop-loss / iz süren stop) SADECE sunucu tarafında
+      // (trading_bot.py + monitor.py, GitHub Actions üzerinde) veriliyor. Bu, alım
+      // tarafında zaten yaptığımız "tek otorite" prensibini kapatma tarafına da
+      // taşıyor — iki ayrı yerin (tarayıcı + bot) aynı anda, farklı fiyat
+      // kaynaklarıyla kapatma denemesi "çırpınma"ya (fazladan aç/kapa) yol açıyordu.
+      // Aşağıdaki blok artık SADECE ekranda gösterim ve zirve fiyat takibi yapıyor,
+      // gerçek kapatma yazmıyor.
+      {
         remainingTrades.push(updatedTrade);
 
         // Yeni bir zirve fiyata ulaşıldıysa, iz süren stop'un kalıcı olması için
