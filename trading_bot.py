@@ -488,13 +488,13 @@ def get_position_size_try(available_cash: float, ai_score: int) -> float:
     """Sabit tutar yerine, güven skoruna göre kademeli, bakiyenin yüzdesi olarak pozisyon büyüklüğü.
     100 TL'lik cüzdanla 10.000 TL'lik cüzdan orantısal olarak aynı davranır."""
     if ai_score >= 90:
-        pct = 0.08
+        pct = 0.14
     elif ai_score >= 80:
-        pct = 0.06
+        pct = 0.10
     elif ai_score >= 70:
-        pct = 0.04
+        pct = 0.07
     else:
-        pct = 0.03
+        pct = 0.05
 
     amount = available_cash * pct
     amount = max(MIN_TRADE_AMOUNT_TRY, amount)
@@ -547,12 +547,20 @@ def analyze_markets_with_gemini(shortlist: pd.DataFrame, market_regime: str) -> 
 Sen kural tabanlı çalışan bir Kripto Para Teknik Analiz Motorusun. Kendi sezgine göre TAHMİN ETME;
 sadece aşağıda verilen GERÇEK, HESAPLANMIŞ göstergeleri belirtilen kurallara göre birleştirerek puanla.
 
-GENEL PİYASA REJİMİ (BTC 4 saatlik trend): {market_regime}
-- Rejim DÜŞÜŞ ise: hiçbir pariteye 70'in üzerinde puan verme.
-- Rejim NÖTR ise: en fazla 85 puan ver.
-- Rejim YÜKSELİŞ ise: normal puanlama kurallarını uygula.
+ÇOK ÖNEMLİ — PUANLARIN BİRBİRİNE YAPIŞMASINI (AYNI SAYIYA TIKANMASINI) ÖNLE:
+Her parite farklı göstergelere sahip, bu yüzden puanları da farklı olmalı. Aşağıdaki
+adımları SIRAYLA uygula, "en fazla X puan" gibi bir sert tavana yuvarlamak yerine
+ORANTISAL küçültme kullan ki güçlü adaylar birbirinden ayrışabilsin:
+1. Önce her parite için HAM puanı (taban 50 + aşağıdaki tüm etkiler toplamı) hesapla,
+   bu 50-130 arası bir değer olabilir.
+2. Piyasa rejimine göre şu ORANTISAL çarpanı uygula (taban 50'yi DEĞİL, 50'nin
+   ÜZERİNDEKİ kısmı çarp): YÜKSELİŞ rejiminde çarpan 1.0, NÖTR rejiminde çarpan 0.65,
+   DÜŞÜŞ rejiminde çarpan 0.35. Yani: nihai_puan = 50 + (ham_puan - 50) * çarpan.
+   Bu şekilde ham puanı 100 olan bir parite NÖTR'de ~82, ham puanı 80 olan bir parite
+   NÖTR'de ~70 olur — ikisi de farklı kalır, ikisi de aynı sert tavana YAPIŞMAZ.
+3. Sonucu 0-100 aralığında sınırla ve en yakın tam sayıya yuvarla.
 
-HER PARİTE İÇİN PUANLAMA KURALLARI (taban puan 50'den başla).
+HER PARİTE İÇİN HAM PUANLAMA KURALLARI (taban puan 50'den başla).
 NOT: Bu ağırlıklar, 364 coin / 6 aylık / 56.092 gün-gözlemlik gerçek geçmiş veri
 üzerinde yapılan "taban oran karşılaştırmalı" (lift) analize dayanır — klasik
 "aşırı satımda al, aşırı alımda sat" mantığı DEĞİL, gerçek istatistiksel bulgu
@@ -563,7 +571,7 @@ kullanılmıştır:
 - rsi_14 < 30 (gerçek veride öngörü değeri neredeyse yok, LIFT 0.94x): 0 puan (ne ödül ne ceza)
 - ema_trend == "GÜÇLÜ_YÜKSELİŞ" (LIFT 1.48x): +20 | "YÜKSELİŞ" (LIFT ~1.0x, nötr): +3
 - ema_trend == "GÜÇLÜ_DÜŞÜŞ" (LIFT 0.76x): -15 | "DÜŞÜŞ" (LIFT 0.94x, hafif negatif): -3
-- volume_vs_avg_ratio > 1.5 (LIFT 1.74x — güçlü gerçek sinyal): +15 puan
+- volume_vs_avg_ratio > 1.5 (LIFT 1.74x — güçlü gerçek sinyal): +15 puan (2x'ten fazlaysa +22 puan ver, orantılı düşün)
 - volume_vs_avg_ratio < 1.0 (LIFT ~0.83x, hafif negatif, iki taraf da benzer): -5 puan
 - change_24h_percent > 15: -10 (aşırı ısınmış, kısa vadeli geri çekilme riski)
 - pct_below_30d_high < 3 (30 günlük ZİRVEYE çok yakın; gerçek veride LIFT sadece 0.90x, zayıf bir sinyal): -5 puan (eskisi -20'ydi, veri güçlü bir etki göstermediği için azaltıldı)
@@ -691,7 +699,10 @@ def run_scan_cycle(client: SupabaseRestClient):
     # Çeşitlendirme: her kategoriden makul bir üst sınıra kadar izin ver
     # (eskisi gibi "kategori başına sadece 1" değil — ALT kategorisi coinlerin
     # büyük çoğunluğunu kapsadığı için bu, botu neredeyse tamamen durduruyordu).
-    MAX_PER_CATEGORY = {"MAJOR": 2, "ALT": 5, "STABLE": 0}
+    # NOT: MAJOR (BTC, ETH, BNB vb.) coinlerin günlük volatilitesi genelde düşük;
+    # bu hızlı-momentum stratejisi için altcoinler daha uygun fırsat sunuyor.
+    # Bu yüzden MAJOR kapasitesi kasıtlı olarak düşük tutuluyor.
+    MAX_PER_CATEGORY = {"MAJOR": 1, "ALT": 7, "STABLE": 0}
 
     held_category_counts = Counter(get_category(s) for s in held_symbols)
 
