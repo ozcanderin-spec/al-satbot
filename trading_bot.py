@@ -663,7 +663,7 @@ def run_scan_cycle(client: SupabaseRestClient):
     for _, row in shortlist.iterrows():
         sym = row['symbol']
         ai_data = ai_dict.get(sym, {"ai_score": 50, "signal_type": "NEUTRAL", "scan_reason": "Analiz bekleniyor."})
-        ai_score = int(ai_data.get("ai_score", 50))
+        ai_score = max(0, min(100, int(ai_data.get("ai_score", 50))))
         signal_type = str(ai_data.get("signal_type", "NEUTRAL"))
         scan_reason = str(ai_data.get("scan_reason", "Teknik tarama tamamlandı."))
 
