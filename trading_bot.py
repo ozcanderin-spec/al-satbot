@@ -76,7 +76,7 @@ if not SUPABASE_URL or not SUPABASE_KEY or not GEMINI_API_KEY:
     raise SystemExit(1)
 
 genai.configure(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-flash-latest"  # Sabit sürüm yerine takma ad — Google modeli değiştirse bile kırılmaz
+MODEL_NAME = "gemini-flash-lite-latest"  # "flash-latest" günde sadece 20 ücretsiz istekle sınırlıydı; "lite" çok daha yüksek ücretsiz kota sunuyor
 model = genai.GenerativeModel(model_name=MODEL_NAME, generation_config={"response_mime_type": "application/json"})
 
 
