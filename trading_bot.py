@@ -532,7 +532,7 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
         is_trailing_active = peak_profit_pct >= TRAILING_ACTIVATION_PCT
         trailing_stop_price = round(live_highest * (1 - TRAILING_DISTANCE_PCT / 100), 8) if is_trailing_active else None
 
-        if live_highest > previous_highest:
+        if trade.get("highest_price_reached") is None or live_highest > previous_highest:
             client.update_trade_peak(trade["id"], live_highest, trailing_stop_price)
 
         # Trailing aktif olduktan sonra çıkış doğrudan zirveden belirlenen stop fiyatına bağlanır.
