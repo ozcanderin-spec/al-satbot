@@ -188,7 +188,9 @@ class SupabaseRestClient:
         if trailing_stop_price is not None:
             payload["trailing_stop_price"] = trailing_stop_price
         try:
-            requests.patch(url, headers=self.headers, params={"id": f"eq.{trade_id}"}, json=payload, timeout=10)
+            resp = requests.patch(url, headers=self.headers, params={"id": f"eq.{trade_id}"}, json=payload, timeout=10)
+            if resp.status_code not in (200, 201, 204):
+                logger.warning(f"Zirve fiyat güncellenemedi ({trade_id}) - HTTP {resp.status_code}: {resp.text}")
         except Exception as e:
             logger.warning(f"Zirve fiyat güncellenemedi ({trade_id}): {e}")
 
@@ -523,22 +525,25 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
         pnl = live_value - total_amount
         pnl_pct = (pnl / total_amount) * 100
 
+        # Zirveyi her kontrolde önce kaydet: Supabase güncellemesi başarısız olsa bile artık sessizce geçilmez.
         gross_peak_value = quantity * live_highest
         net_peak_value = gross_peak_value * (1 - FEE_RATE)
         peak_profit_pct = ((net_peak_value - total_amount) / total_amount) * 100
         is_trailing_active = peak_profit_pct >= TRAILING_ACTIVATION_PCT
-        drawdown_pct = ((net_peak_value - live_value) / net_peak_value) * 100 if net_peak_value else 0
+        trailing_stop_price = round(live_highest * (1 - TRAILING_DISTANCE_PCT / 100), 8) if is_trailing_active else None
 
-        should_close = (drawdown_pct >= TRAILING_DISTANCE_PCT) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
+        if live_highest > previous_highest:
+            client.update_trade_peak(trade["id"], live_highest, trailing_stop_price)
+
+        # Trailing aktif olduktan sonra çıkış doğrudan zirveden belirlenen stop fiyatına bağlanır.
+        # Böylece kâr zirvesinden geri dönüşte stop kaybolmaz.
+        should_close = (live_price <= trailing_stop_price) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
 
         if should_close:
             reason = "TRAILING_STOP" if is_trailing_active else "STOP_LOSS"
             client.close_trade(trade["id"], exit_price=live_price, realized_pnl=round(pnl, 2), reason=reason)
         else:
-            if live_highest > previous_highest:
-                trailing_stop_price = round(live_highest * (1 - TRAILING_DISTANCE_PCT / 100), 8) if is_trailing_active else None
-                client.update_trade_peak(trade["id"], live_highest, trailing_stop_price)
-            logger.info(f"{symbol}: PnL %{pnl_pct:.2f} | Zirve kâr %{peak_profit_pct:.2f} | Trailing aktif: {is_trailing_active} — açık kalıyor.")
+            logger.info(f"{symbol}: PnL %{pnl_pct:.2f} | Zirve kâr %{peak_profit_pct:.2f} | Trailing aktif: {is_trailing_active} | Kar koruma: %{TRAILING_DISTANCE_PCT:.2f} | Stop fiyatı: ₺{trailing_stop_price:.8f}" if is_trailing_active else f"{symbol}: PnL %{pnl_pct:.2f} | Zirve kâr %{peak_profit_pct:.2f} | Trailing aktif: False — açık kalıyor.")
 
     logger.info("--- Pozisyon izleme tamamlandı ---")
 
