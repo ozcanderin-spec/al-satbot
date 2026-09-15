@@ -58,7 +58,6 @@ BINANCE_TICKER_URLS = [
 STOP_LOSS_PERCENT_DEFAULT = 1.25       # Sabit stop-loss (kâr %3'e ulaşana kadar)
 TRAILING_ACTIVATION_PCT = 3.0          # Bu kâr yüzdesinden sonra iz süren stop devreye girer
 FEE_RATE = 0.001                        # Binance standart %0.1 komisyon
-MAX_UNIVERSE_SIZE = 250                 # Ucuz taramada bakılacak azami parite sayısı
 MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detaylı analiz edilecek azami sayı
 LOSS_COOLDOWN_HOURS = 3                 # Zararla kapanan bir coin bu süre boyunca tekrar alınmaz
 MIN_TRADE_AMOUNT_TRY = 100.0            # Minimum işlem tutarı
@@ -295,23 +294,57 @@ def fetch_try_pairs_yahoo_fallback() -> pd.DataFrame:
 
 
 def build_scan_universe(df_all: pd.DataFrame) -> pd.DataFrame:
-    """Yükselenler + düşenler + en hacimliler listelerinden ~250'ye kadar aday toplar."""
+    """Likidite, hacim ve fiyat hareketliliğine göre dinamik tarama evreni oluşturur.
+
+    Sabit sayıda yükselen/düşen/hacimli coin seçmek yerine, o anki piyasa
+    koşullarına göre kriterleri sağlayan pariteleri dahil eder. Böylece sakin
+    piyasada evren küçülür, hareketli piyasada genişler.
+    """
     liquid = df_all[df_all['quoteVolume'] > 50000].copy()
     if liquid.empty:
         liquid = df_all.copy()
 
-    gainers = liquid.sort_values('priceChangePercent', ascending=False).head(100)
-    losers = liquid.sort_values('priceChangePercent', ascending=True).head(75)
-    by_volume = liquid.sort_values('quoteVolume', ascending=False).head(100)
+    if liquid.empty:
+        logger.warning("Tarama evreni oluşturulamadı: uygun TRY paritesi yok.")
+        return liquid
 
-    universe = pd.concat([gainers, losers, by_volume]).drop_duplicates(subset='symbol')
-    universe = universe.head(MAX_UNIVERSE_SIZE).reset_index(drop=True)
-    logger.info(f"Tarama evreni: {len(universe)} parite (yükselen+düşen+hacimli birleşimi).")
+    volume_quantiles = liquid['quoteVolume'].quantile([0.30, 0.70])
+    volume_floor = float(volume_quantiles.loc[0.30])
+    volume_high = float(volume_quantiles.loc[0.70])
+
+    liquid['abs_change_percent'] = liquid['priceChangePercent'].abs()
+    movement_quantile = float(liquid['abs_change_percent'].quantile(0.60))
+    movement_floor = max(0.75, movement_quantile)
+
+    # En az orta seviyede hacimli ve belirgin şekilde hareketlenen coinler
+    # ile yüksek hacimli coinleri birlikte tutuyoruz.
+    movement_candidates = liquid[
+        (liquid['quoteVolume'] >= volume_floor) &
+        (liquid['abs_change_percent'] >= movement_floor)
+    ]
+
+    high_volume_candidates = liquid[liquid['quoteVolume'] >= volume_high]
+
+    # Çok yükselen/düşenleri ayrı bir liste olarak koruyoruz; ancak artık
+    # sabit ilk N sınırı yok. Hareketlilik ve hacim kriterini geçenlerin
+    # tamamı dinamik evrene dahil edilir.
+    universe = pd.concat([movement_candidates, high_volume_candidates])
+    universe = universe.drop_duplicates(subset='symbol').copy()
+    universe = universe.drop(columns=['abs_change_percent'], errors='ignore')
+    universe = universe.sort_values(
+        ['quoteVolume', 'priceChangePercent'],
+        ascending=[False, False]
+    ).reset_index(drop=True)
+
+    logger.info(
+        f"Dinamik tarama evreni: {len(universe)} parite "
+        f"(likidite + hacim + hareketlilik kriterleri)."
+    )
     return universe
 
 
 def shortlist_for_detailed_analysis(universe: pd.DataFrame, excluded_symbols: Set[str]) -> pd.DataFrame:
-    """250'lik evrenden, gerçek gösterge hesaplamaya değecek en umut vadeden ~40 adayı seçer
+    """Dinamik tarama evreninden, gerçek gösterge hesaplamaya değecek en umut vadeden ~40 adayı seçer
     (ucuz/hızlı bir puanla önce elenir, pahalı analiz sadece bunlara yapılır)."""
     df = universe[~universe['symbol'].isin(excluded_symbols)].copy()
     df = df[df['symbol'].apply(lambda s: get_category(s) != "STABLE")]
