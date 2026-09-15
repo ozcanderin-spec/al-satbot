@@ -115,7 +115,7 @@ class SupabaseRestClient:
             return data[0] if data else default
         except Exception as e:
             logger.error(f"bot_config okunamadı: {e}")
-            return default
+            raise RuntimeError(f"bot_config okunamadı, güvenlik nedeniyle döngü durduruluyor: {e}") from e
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/rest/v1/trades"
@@ -129,7 +129,7 @@ class SupabaseRestClient:
             return resp.json()
         except Exception as e:
             logger.error(f"Açık pozisyonlar okunamadı: {e}")
-            return []
+            raise RuntimeError(f"Açık pozisyonlar okunamadı, güvenlik nedeniyle döngü durduruluyor: {e}") from e
 
     def get_recent_losing_symbols(self, cooldown_hours: int) -> Set[str]:
         url = f"{self.base_url}/rest/v1/trades"
@@ -451,12 +451,9 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
 
     for trade in open_positions:
         symbol = trade.get("symbol")
-        live_price = price_lookup.get(symbol)
-        if live_price is None:
-            logger.warning(f"{symbol} tarama fiyat listesinde yok, doğrudan anlık fiyat sorgulanıyor.")
-            live_price = fetch_live_price(symbol)
+        live_price = fetch_live_price(symbol)
         if live_price is None or float(live_price) <= 0:
-            logger.error(f"{symbol} için güvenilir güncel fiyat alınamadı; stop-loss kontrolü bu döngüde güvenli şekilde atlanıyor.")
+            logger.error(f"{symbol} için doğrudan Binance güncel fiyatı alınamadı; yanlış fiyatla stop-loss çalıştırmamak için bu döngüde güvenli şekilde atlanıyor.")
             continue
         live_price = float(live_price)
 
@@ -480,7 +477,7 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
         is_trailing_active = peak_profit_pct >= TRAILING_ACTIVATION_PCT
         drawdown_pct = ((net_peak_value - live_value) / net_peak_value) * 100 if net_peak_value else 0
 
-        should_close = (drawdown_pct >= stop_loss_percent) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
+        should_close = (drawdown_pct >= TRAILING_DISTANCE_PCT) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
 
         if should_close:
             reason = "TRAILING_STOP" if is_trailing_active else "STOP_LOSS"
@@ -644,16 +641,16 @@ def run_scan_cycle(client: SupabaseRestClient):
 
     logger.info(f"Mod: {mode} | Acil Durdurma: {emergency_stop} | Min Skor: {min_ai_score}")
 
-    if emergency_stop:
-        logger.warning("ACİL DURDURMA aktif! Yeni alım yapılmayacak.")
-        return
-
     df_all = fetch_all_try_data()
     price_lookup = dict(zip(df_all['symbol'], df_all['lastPrice'])) if not df_all.empty else {}
 
     # 1) Önce açık pozisyonları izle/kapat (tarayıcı kapalı olsa bile)
     # Piyasa taraması boş gelse bile açık pozisyonların fiyatı doğrudan sorgulanır.
     monitor_and_close_positions(client, price_lookup, config)
+
+    if emergency_stop:
+        logger.warning("ACİL DURDURMA aktif! Açık pozisyonlar izlendi; yeni alım yapılmayacak.")
+        return
 
     if df_all.empty:
         logger.error("Binance verisi boş geldi, yeni tarama/alım döngüsü atlanıyor.")
