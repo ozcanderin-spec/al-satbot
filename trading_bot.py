@@ -658,7 +658,7 @@ Her parite farklı göstergelere sahip, bu yüzden puanları da farklı olmalı.
 adımları SIRAYLA uygula. Önce ham puanı hesapla, sonra piyasa rejimi çarpanını uygula.
 
 1. HAM PUAN: 50'den başla ve aşağıdaki etkileri topla.
-2. Piyasa rejimi çarpanı: YÜKSELİŞ 1.0, NÖTR 0.65, DÜŞÜŞ 0.35.
+2. Piyasa rejimi çarpanı: YÜKSELİŞ 1.0, NÖTR 0.85, DÜŞÜŞ 0.70.
    Nihai puan = 50 + (ham_puan - 50) * çarpan.
 3. Sonucu 0-100 aralığında sınırla ve tam sayıya yuvarla.
 
