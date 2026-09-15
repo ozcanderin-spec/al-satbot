@@ -55,8 +55,9 @@ BINANCE_TICKER_URLS = [
 ]
 
 # --- Strateji sabitleri (kullanıcı talebine göre ayarlanmıştır) ---
-STOP_LOSS_PERCENT_DEFAULT = 2.0        # Sabit stop-loss (kâr %3.25'i geçene kadar)
-TRAILING_ACTIVATION_PCT = 3.25         # Kâr %3.25'i geçtiğinde iz süren stop devreye girer
+STOP_LOSS_PERCENT_DEFAULT = 2.0        # Girişten itibaren sabit stop-loss (kâr %3.25'e ulaşana kadar)
+TRAILING_ACTIVATION_PCT = 3.25         # Bu kâr yüzdesinden sonra iz süren stop devreye girer
+TRAILING_STOP_DISTANCE_PCT = 1.2       # İz süren stop devredeyken, zirveden bu kadar geri çekilince satar
 FEE_RATE = 0.001                        # Binance standart %0.1 komisyon
 MAX_UNIVERSE_SIZE = 250                 # Ucuz taramada bakılacak azami parite sayısı
 MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detaylı analiz edilecek azami sayı
@@ -427,6 +428,7 @@ def get_market_regime() -> str:
 def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[str, float], config: Dict[str, Any]):
     logger.info("--- Açık pozisyonlar izleniyor (stop-loss / iz süren stop) ---")
     stop_loss_percent = float(config.get("stop_loss_percent", STOP_LOSS_PERCENT_DEFAULT) or STOP_LOSS_PERCENT_DEFAULT)
+    trailing_distance_percent = float(config.get("trailing_stop_pct", TRAILING_STOP_DISTANCE_PCT) or TRAILING_STOP_DISTANCE_PCT)
 
     open_positions = client.get_open_positions()
     if not open_positions:
@@ -456,17 +458,19 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
         gross_peak_value = quantity * live_highest
         net_peak_value = gross_peak_value * (1 - FEE_RATE)
         peak_profit_pct = ((net_peak_value - total_amount) / total_amount) * 100
-        is_trailing_active = peak_profit_pct > TRAILING_ACTIVATION_PCT
+        is_trailing_active = peak_profit_pct >= TRAILING_ACTIVATION_PCT
         drawdown_pct = ((net_peak_value - live_value) / net_peak_value) * 100 if net_peak_value else 0
 
-        should_close = (drawdown_pct >= stop_loss_percent) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
+        # Kâr %3.25'i geçmeden: girişten -%2 sabit stop-loss.
+        # Kâr %3.25'i geçtikten sonra: sabit stop devre dışı, zirveden -%1.2 iz süren stop devrede.
+        should_close = (drawdown_pct >= trailing_distance_percent) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
 
         if should_close:
             reason = "TRAILING_STOP" if is_trailing_active else "STOP_LOSS"
             client.close_trade(trade["id"], exit_price=live_price, realized_pnl=round(pnl, 2), reason=reason)
         else:
             if live_highest > previous_highest:
-                trailing_stop_price = round(live_highest * (1 - 1.2 / 100), 8) if is_trailing_active else None
+                trailing_stop_price = round(live_highest * (1 - trailing_distance_percent / 100), 8) if is_trailing_active else None
                 client.update_trade_peak(trade["id"], live_highest, trailing_stop_price)
             logger.info(f"{symbol}: PnL %{pnl_pct:.2f} | Zirve kâr %{peak_profit_pct:.2f} | Trailing aktif: {is_trailing_active} — açık kalıyor.")
 
