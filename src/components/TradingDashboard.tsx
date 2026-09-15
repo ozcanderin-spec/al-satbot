@@ -504,7 +504,7 @@ ${closedPositionsStr}
             <div className="flex items-center gap-2">
               <span>Aktif Açık Pozisyonlar ({trades.length})</span>
               <span className="text-[10px] text-slate-500 font-normal">
-                (İz Süren Stop-Loss: -%{config.stop_loss_percent} • Kâr-Al: +%{config.take_profit_percent})
+                (İz Süren Stop-Loss: -%2.0 • Kâr-Al: +%{config.take_profit_percent})
               </span>
             </div>
 
@@ -594,12 +594,12 @@ ${closedPositionsStr}
               {trades.map(trade => {
                 const isProfit = trade.unrealized_pnl >= 0;
                 
-                // Calculate if trailing stop is activated yet (peak profit >= 2.8%)
+                // Calculate if trailing stop is activated yet (peak profit >= 3.0%)
                 const grossPeakValue = trade.quantity * (trade.highest_price || trade.entry_price);
                 const peakSellFee = grossPeakValue * 0.001;
                 const netPeakValue = grossPeakValue - peakSellFee;
                 const peakProfitPct = ((netPeakValue - trade.total_amount) / trade.total_amount) * 100;
-                const isTrailingActivated = peakProfitPct >= 2.8;
+                const isTrailingActivated = peakProfitPct >= 3.0;
 
                 return (
                   <div
@@ -623,7 +623,7 @@ ${closedPositionsStr}
                               ? 'bg-purple-500/15 text-purple-300 border-purple-500/30 animate-pulse' 
                               : 'bg-slate-800/80 text-slate-400 border-slate-700'
                           }`}>
-                            {isTrailingActivated ? '🧬 İz Süren Aktif (Zirve Kâr >= %2.8)' : '⏱️ Standart Stop (Zirve < %2.8)'}
+                            {isTrailingActivated ? '🧬 İz Süren Aktif (Zirve Kâr >= %3.0)' : '⏱️ Standart Stop (Zirve < %3.0)'}
                           </span>
                           {trade.trend_15m && (
                             <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
