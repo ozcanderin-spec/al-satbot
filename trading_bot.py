@@ -62,6 +62,13 @@ MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detayl�
 LOSS_COOLDOWN_HOURS = 3                 # Zararla kapanan bir coin bu süre boyunca tekrar alınmaz
 MIN_TRADE_AMOUNT_TRY = 100.0            # Minimum işlem tutarı
 PEAK_PROXIMITY_PENALTY_PCT = 3.0        # 30 günlük zirveye bu kadar yakınsa puan kırılır
+DAILY_LOSS_LIMIT_PCT = 2.0              # Günlük gerçekleşmiş zarar limiti
+MAX_OPEN_POSITIONS = 3                  # Aynı anda tutulabilecek azami pozisyon
+REGIME_MAX_USAGE_PCT = {
+    "DÜŞÜŞ": 20.0,                     # Kötü piyasada sermayenin çoğu nakitte
+    "NÖTR": 40.0,                      # Kararsız piyasada kontrollü kullanım
+    "YÜKSELİŞ": 70.0,                 # İyi piyasada daha yüksek sermaye kullanımı
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,7 +110,7 @@ class SupabaseRestClient:
     def get_bot_config(self) -> Dict[str, Any]:
         url = f"{self.base_url}/rest/v1/bot_config"
         default = {
-            "active_mode": "VIRTUAL", "emergency_stop": False, "min_ai_score_to_buy": 75,
+            "active_mode": "VIRTUAL", "emergency_stop": False, "min_ai_score_to_buy": 80,
             "virtual_balance": 10000.0, "max_balance_usage_pct": 70.0, "reserve_cash_pct": 30.0,
         }
         try:
@@ -539,30 +546,56 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
 # ------------------------------------------------------------------------------
 # 6. POZİSYON BÜYÜKLÜĞÜ: BAKİYENİN YÜZDESİ (sabit tutar DEĞİL)
 # ------------------------------------------------------------------------------
-def get_available_cash(config: Dict[str, Any], open_positions: List[Dict[str, Any]]) -> float:
+def get_available_cash(config: Dict[str, Any], open_positions: List[Dict[str, Any]], market_regime: str) -> float:
+    """Piyasa rejimine göre kullanılabilecek toplam sermayeyi hesaplar.
+
+    DÜŞÜŞ: %20, NÖTR: %40, YÜKSELİŞ: %70. Böylece kötü piyasada sermayenin
+    büyük bölümü nakitte kalır; iyi piyasada daha fazla sermaye çalışabilir.
+    """
     virtual_balance = float(config.get("virtual_balance", 10000.0) or 10000.0)
-    max_usage_pct = float(config.get("max_balance_usage_pct", 70.0) or 70.0)
+    max_usage_pct = REGIME_MAX_USAGE_PCT.get(market_regime, 40.0)
     usable_capital = virtual_balance * (max_usage_pct / 100.0)
     already_invested = sum(float(p.get("total_amount") or 0) for p in open_positions)
     return max(0.0, usable_capital - already_invested)
 
 
-def get_position_size_try(available_cash: float, ai_score: int) -> float:
-    """Sabit tutar yerine, güven skoruna göre kademeli, bakiyenin yüzdesi olarak pozisyon büyüklüğü.
-    100 TL'lik cüzdanla 10.000 TL'lik cüzdan orantısal olarak aynı davranır."""
-    if ai_score >= 90:
-        pct = 0.14
-    elif ai_score >= 80:
-        pct = 0.10
-    elif ai_score >= 70:
-        pct = 0.07
-    else:
-        pct = 0.05
+def get_position_size_try(virtual_balance: float, available_cash: float, ai_score: int) -> float:
+    """Gemini skoruna göre toplam cüzdanın yüzdesi kadar pozisyon açar.
 
-    amount = available_cash * pct
+    80-84: %10, 85-89: %15, 90-94: %20, 95+: %25.
+    Pozisyon hiçbir zaman mevcut kullanılabilir sermayeyi aşmaz.
+    """
+    if ai_score >= 95:
+        pct = 0.25
+    elif ai_score >= 90:
+        pct = 0.20
+    elif ai_score >= 85:
+        pct = 0.15
+    else:
+        pct = 0.10
+
+    amount = virtual_balance * pct
     amount = max(MIN_TRADE_AMOUNT_TRY, amount)
     amount = min(amount, available_cash)
     return round(amount, 2)
+
+
+def get_daily_realized_pnl(client: SupabaseRestClient) -> float:
+    """Türkiye saatine göre bugünkü kapanmış işlemlerin gerçekleşmiş PnL toplamını döndürür."""
+    closed = client.get_recent_closed_trades(limit=200)
+    today = pd.Timestamp.now("Europe/Istanbul").date()
+    total_pnl = 0.0
+    for trade in closed:
+        try:
+            closed_at = pd.Timestamp(trade["closed_at"])
+            if closed_at.tzinfo is None:
+                closed_at = closed_at.tz_localize("UTC")
+            closed_at = closed_at.tz_convert("Europe/Istanbul")
+            if closed_at.date() == today:
+                total_pnl += float(trade.get("realized_pnl") or 0)
+        except Exception:
+            continue
+    return total_pnl
 
 
 # ------------------------------------------------------------------------------
@@ -718,7 +751,7 @@ def run_scan_cycle(client: SupabaseRestClient):
     config = client.get_bot_config()
     mode = config.get("active_mode", "VIRTUAL")
     emergency_stop = config.get("emergency_stop", False)
-    min_ai_score = int(config.get("min_ai_score_to_buy", 75) or 75)
+    min_ai_score = max(80, int(config.get("min_ai_score_to_buy", 80) or 80))
 
     logger.info(f"Mod: {mode} | Acil Durdurma: {emergency_stop} | Min Skor: {min_ai_score}")
 
@@ -788,20 +821,33 @@ def run_scan_cycle(client: SupabaseRestClient):
         logger.info("Mod VIRTUAL değil, otomatik alım bu script tarafından yapılmıyor (güvenlik).")
         return
 
-    available_cash = get_available_cash(config, open_positions)
-    logger.info(f"Kullanılabilir nakit: ₺{available_cash:.2f} (açık pozisyon sayısı: {len(open_positions)}, sınır yok)")
+    virtual_balance = float(config.get("virtual_balance", 10000.0) or 10000.0)
+    available_cash = get_available_cash(config, open_positions, market_regime)
+    max_usage_pct = REGIME_MAX_USAGE_PCT.get(market_regime, 40.0)
+    logger.info(
+        f"Piyasa rejimi: {market_regime} | Azami aktif sermaye: %{max_usage_pct:.0f} | "
+        f"Kullanılabilir nakit: ₺{available_cash:.2f} | Açık pozisyon: {len(open_positions)}/{MAX_OPEN_POSITIONS}"
+    )
+
+    daily_pnl = get_daily_realized_pnl(client)
+    daily_loss_limit = virtual_balance * (DAILY_LOSS_LIMIT_PCT / 100.0)
+    logger.info(f"Bugünkü gerçekleşmiş PnL: ₺{daily_pnl:.2f} | Günlük zarar limiti: -₺{daily_loss_limit:.2f}")
+    if daily_pnl <= -daily_loss_limit:
+        logger.warning("Günlük zarar limiti aşıldı. Yeni alım yapılmayacak.")
+        return
+
+    if len(open_positions) >= MAX_OPEN_POSITIONS:
+        logger.info("Maksimum açık pozisyon sayısına ulaşıldı. Yeni alım yapılmayacak.")
+        return
 
     if available_cash < MIN_TRADE_AMOUNT_TRY:
         logger.info("Kullanılabilir nakit minimum işlem tutarının altında, yeni alım yapılmayacak.")
         return
 
-    # Çeşitlendirme: her kategoriden makul bir üst sınıra kadar izin ver
-    # (eskisi gibi "kategori başına sadece 1" değil — ALT kategorisi coinlerin
-    # büyük çoğunluğunu kapsadığı için bu, botu neredeyse tamamen durduruyordu).
-    # NOT: MAJOR (BTC, ETH, BNB vb.) coinlerin günlük volatilitesi genelde düşük;
-    # bu hızlı-momentum stratejisi için altcoinler daha uygun fırsat sunuyor.
-    # Bu yüzden MAJOR kapasitesi kasıtlı olarak düşük tutuluyor.
-    MAX_PER_CATEGORY = {"MAJOR": 1, "ALT": 7, "STABLE": 0}
+    # Çeşitlendirme: aynı anda en fazla 3 pozisyon.
+    # MAJOR kapasitesi düşük tutulur; hızlı momentum stratejisi için altcoinlere
+    # daha fazla fırsat bırakılır. Toplam açık pozisyon sayısı ayrıca üstten sınırlandırılır.
+    MAX_PER_CATEGORY = {"MAJOR": 1, "ALT": 2, "STABLE": 0}
 
     held_category_counts = Counter(get_category(s) for s in held_symbols)
 
@@ -818,8 +864,10 @@ def run_scan_cycle(client: SupabaseRestClient):
     selected_category_counts = Counter(held_category_counts)
     final_candidates = []
     for c in candidates:
+        if len(final_candidates) >= MAX_OPEN_POSITIONS - len(open_positions):
+            break
         cat = get_category(c["symbol"])
-        limit = MAX_PER_CATEGORY.get(cat, 3)
+        limit = MAX_PER_CATEGORY.get(cat, 2)
         if selected_category_counts[cat] >= limit:
             continue
         selected_category_counts[cat] += 1
@@ -830,7 +878,7 @@ def run_scan_cycle(client: SupabaseRestClient):
         if remaining_cash < MIN_TRADE_AMOUNT_TRY:
             break
 
-        amount_try = get_position_size_try(remaining_cash, candidate["ai_score"])
+        amount_try = get_position_size_try(virtual_balance, remaining_cash, candidate["ai_score"])
         buy_fee = amount_try * FEE_RATE
         net_investment = amount_try - buy_fee
         entry_price = candidate["price"]
