@@ -55,15 +55,15 @@ BINANCE_TICKER_URLS = [
 ]
 
 # --- Strateji sabitleri (kullanıcı talebine göre ayarlanmıştır) ---
-STOP_LOSS_PERCENT_DEFAULT = 1.25       # Sabit stop-loss (kâr %3'e ulaşana kadar)
+STOP_LOSS_PERCENT_DEFAULT = 2.0        # Sabit stop-loss (kâr %3'e ulaşana kadar)
 TRAILING_ACTIVATION_PCT = 3.0          # Bu kâr yüzdesinden sonra iz süren stop devreye girer
 FEE_RATE = 0.001                        # Binance standart %0.1 komisyon
 MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detaylı analiz edilecek azami sayı
 LOSS_COOLDOWN_HOURS = 3                 # Zararla kapanan bir coin bu süre boyunca tekrar alınmaz
 MIN_TRADE_AMOUNT_TRY = 100.0            # Minimum işlem tutarı
 PEAK_PROXIMITY_PENALTY_PCT = 3.0        # 30 günlük zirveye bu kadar yakınsa puan kırılır
+TRAILING_DISTANCE_PCT = 1.2           # Trailing stop mesafesi
 DAILY_LOSS_LIMIT_PCT = 2.0              # Günlük gerçekleşmiş zarar limiti
-MAX_OPEN_POSITIONS = 3                  # Aynı anda tutulabilecek azami pozisyon
 REGIME_MAX_USAGE_PCT = {
     "DÜŞÜŞ": 20.0,                     # Kötü piyasada sermayenin çoğu nakitte
     "NÖTR": 40.0,                      # Kararsız piyasada kontrollü kullanım
@@ -496,7 +496,7 @@ def get_market_regime() -> str:
 # ------------------------------------------------------------------------------
 def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[str, float], config: Dict[str, Any]):
     logger.info("--- Açık pozisyonlar izleniyor (stop-loss / iz süren stop) ---")
-    stop_loss_percent = float(config.get("stop_loss_percent", STOP_LOSS_PERCENT_DEFAULT) or STOP_LOSS_PERCENT_DEFAULT)
+    stop_loss_percent = STOP_LOSS_PERCENT_DEFAULT
 
     open_positions = client.get_open_positions()
     if not open_positions:
@@ -529,14 +529,14 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
         is_trailing_active = peak_profit_pct >= TRAILING_ACTIVATION_PCT
         drawdown_pct = ((net_peak_value - live_value) / net_peak_value) * 100 if net_peak_value else 0
 
-        should_close = (drawdown_pct >= stop_loss_percent) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
+        should_close = (drawdown_pct >= TRAILING_DISTANCE_PCT) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
 
         if should_close:
             reason = "TRAILING_STOP" if is_trailing_active else "STOP_LOSS"
             client.close_trade(trade["id"], exit_price=live_price, realized_pnl=round(pnl, 2), reason=reason)
         else:
             if live_highest > previous_highest:
-                trailing_stop_price = round(live_highest * (1 - stop_loss_percent / 100), 8) if is_trailing_active else None
+                trailing_stop_price = round(live_highest * (1 - TRAILING_DISTANCE_PCT / 100), 8) if is_trailing_active else None
                 client.update_trade_peak(trade["id"], live_highest, trailing_stop_price)
             logger.info(f"{symbol}: PnL %{pnl_pct:.2f} | Zirve kâr %{peak_profit_pct:.2f} | Trailing aktif: {is_trailing_active} — açık kalıyor.")
 
@@ -751,7 +751,7 @@ def run_scan_cycle(client: SupabaseRestClient):
     config = client.get_bot_config()
     mode = config.get("active_mode", "VIRTUAL")
     emergency_stop = config.get("emergency_stop", False)
-    min_ai_score = max(80, int(config.get("min_ai_score_to_buy", 80) or 80))
+    min_ai_score = int(config.get("min_ai_score_to_buy", 80) or 80)
 
     logger.info(f"Mod: {mode} | Acil Durdurma: {emergency_stop} | Min Skor: {min_ai_score}")
 
@@ -769,7 +769,7 @@ def run_scan_cycle(client: SupabaseRestClient):
     # 1) Önce açık pozisyonları izle/kapat (tarayıcı kapalı olsa bile)
     monitor_and_close_positions(client, price_lookup, config)
 
-    # 2) Geniş evreni tara (250'ye kadar), sonra en umut vadeden ~40'ı detaylı analiz et
+    # 2) Geniş evreni tara, sonra en umut vadeden ~40'ı detaylı analiz et
     universe = build_scan_universe(df_all)
     open_positions = client.get_open_positions()
     held_symbols = {p["symbol"] for p in open_positions}
@@ -826,7 +826,7 @@ def run_scan_cycle(client: SupabaseRestClient):
     max_usage_pct = REGIME_MAX_USAGE_PCT.get(market_regime, 40.0)
     logger.info(
         f"Piyasa rejimi: {market_regime} | Azami aktif sermaye: %{max_usage_pct:.0f} | "
-        f"Kullanılabilir nakit: ₺{available_cash:.2f} | Açık pozisyon: {len(open_positions)}/{MAX_OPEN_POSITIONS}"
+        f"Kullanılabilir nakit: ₺{available_cash:.2f} | Açık pozisyon: {len(open_positions)}"
     )
 
     daily_pnl = get_daily_realized_pnl(client)
@@ -836,20 +836,9 @@ def run_scan_cycle(client: SupabaseRestClient):
         logger.warning("Günlük zarar limiti aşıldı. Yeni alım yapılmayacak.")
         return
 
-    if len(open_positions) >= MAX_OPEN_POSITIONS:
-        logger.info("Maksimum açık pozisyon sayısına ulaşıldı. Yeni alım yapılmayacak.")
-        return
-
     if available_cash < MIN_TRADE_AMOUNT_TRY:
         logger.info("Kullanılabilir nakit minimum işlem tutarının altında, yeni alım yapılmayacak.")
         return
-
-    # Çeşitlendirme: aynı anda en fazla 3 pozisyon.
-    # MAJOR kapasitesi düşük tutulur; hızlı momentum stratejisi için altcoinlere
-    # daha fazla fırsat bırakılır. Toplam açık pozisyon sayısı ayrıca üstten sınırlandırılır.
-    MAX_PER_CATEGORY = {"MAJOR": 1, "ALT": 2, "STABLE": 0}
-
-    held_category_counts = Counter(get_category(s) for s in held_symbols)
 
     candidates = [
         r for r in records_to_upsert
@@ -857,21 +846,10 @@ def run_scan_cycle(client: SupabaseRestClient):
         and r["symbol"] not in held_symbols
         and r["symbol"] not in losing_cooldown_symbols
         and get_category(r["symbol"]) != "STABLE"
-        and held_category_counts[get_category(r["symbol"])] < MAX_PER_CATEGORY.get(get_category(r["symbol"]), 3)
     ]
     candidates.sort(key=lambda r: r["ai_score"], reverse=True)
 
-    selected_category_counts = Counter(held_category_counts)
-    final_candidates = []
-    for c in candidates:
-        if len(final_candidates) >= MAX_OPEN_POSITIONS - len(open_positions):
-            break
-        cat = get_category(c["symbol"])
-        limit = MAX_PER_CATEGORY.get(cat, 2)
-        if selected_category_counts[cat] >= limit:
-            continue
-        selected_category_counts[cat] += 1
-        final_candidates.append(c)
+    final_candidates = candidates
 
     remaining_cash = available_cash
     for candidate in final_candidates:
