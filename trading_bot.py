@@ -645,7 +645,7 @@ def log_performance_summary(client: SupabaseRestClient):
 # ------------------------------------------------------------------------------
 # 8. GEMINI KARAR VE PUANLAMA MOTORU
 # ------------------------------------------------------------------------------
-def analyze_markets_with_gemini(shortlist: pd.DataFrame, market_regime: str) -> List[Dict[str, Any]]:
+def analyze_markets_with_gemini(shortlist: pd.DataFrame, market_regime: str):
     logger.info("Gemini Algo-Trading Karar Motoru çalıştırılıyor (teknik göstergelerle)...")
 
     market_summary = []
@@ -696,7 +696,7 @@ kullanılmıştır:
 - volume_vs_avg_ratio > 1.5 (LIFT 1.74x — güçlü gerçek sinyal): +15 puan (2x'ten fazlaysa +22 puan ver, orantılı düşün)
 - volume_vs_avg_ratio < 1.0 (LIFT ~0.83x, hafif negatif, iki taraf da benzer): -5 puan
 - change_24h_percent > 15: -10 (aşırı ısınmış, kısa vadeli geri çekilme riski)
-- pct_below_30d_high < 3 (30 günlük ZİRVEYE çok yakın; gerçek veride LIFT sadece 0.90x, zayıf bir sinyal): -5 puan (eskisi -20'ydi, veri güçlü bir etki göstermediği için azaltıldı)
+- pct_below_30d_high < 3 (30 günlük ZİRVEYE çok yakın): -15 puan (v6 FIX: gerçek veri lift'i zayıf çıkmıştı [0.90x] diye -5'e düşürülmüştü, ama canlı işlemlerde zirveden alınan pozisyonlar geri çekilme yaşadı — kullanıcı geri bildirimiyle tekrar güçlü bir ceza olarak ayarlandı. Ayrıca aşağıda run_scan_cycle'da SERT bir filtre de var: zirveye bu kadar yakın adaylar puanları ne olursa olsun ALINMIYOR.)
 - pct_below_30d_high diğer durumlarda: puan etkisi yok (gerçek veri anlamlı bir fark göstermedi)
 
 Puanı 0-100 aralığında sınırla. Sonra:
@@ -728,12 +728,12 @@ SADECE aşağıdaki JSON formatında geçerli bir liste döndür, başka hiçbir
     try:
         ai_results = json.loads(response.text)
         logger.info(f"Gemini {len(ai_results)} parite için analiz tamamladı.")
-        return ai_results
+        return ai_results, indicators_by_symbol
     except Exception as e:
         # Sadece JSON ayrıştırma hatasıysa (API çalıştı ama format bozuktu),
         # bu daha ufak/geçici bir sorun olabilir — döngüyü tamamen durdurmuyoruz.
         logger.error(f"Gemini yanıtı ayrıştırılamadı (API çalıştı ama format bozuk): {e}")
-        return []
+        return [], indicators_by_symbol
 
 
 # ------------------------------------------------------------------------------
@@ -776,7 +776,7 @@ def run_scan_cycle(client: SupabaseRestClient):
         return
 
     market_regime = get_market_regime()
-    ai_evaluations = analyze_markets_with_gemini(shortlist, market_regime)
+    ai_evaluations, indicators_by_symbol = analyze_markets_with_gemini(shortlist, market_regime)
     ai_dict = {item["symbol"]: item for item in ai_evaluations if "symbol" in item}
     # NOT: Eşiği burada ayrıca yükseltmiyoruz — Gemini'ye zaten DÜŞÜŞ rejiminde
     # 70'in üzerine çıkmaması talimatı verildi (yukarıdaki prompt). İkisini üst
@@ -792,9 +792,13 @@ def run_scan_cycle(client: SupabaseRestClient):
         ai_score = max(0, min(100, int(ai_data.get("ai_score", 50))))
         signal_type = str(ai_data.get("signal_type", "NEUTRAL"))
         scan_reason = str(ai_data.get("scan_reason", "Teknik tarama tamamlandı."))
+        # v6 FIX: 30 günlük zirveye yakınlık bilgisi, alım öncesi sert filtre
+        # için kayda ekleniyor (aşağıda candidates listesinde kullanılıyor).
+        pct_from_30d_high = float(indicators_by_symbol.get(sym, {}).get("pct_from_30d_high", 100.0))
 
         records_to_upsert.append({"symbol": sym, "price": float(row['lastPrice']), "ai_score": ai_score,
-                                   "signal_type": signal_type, "scan_reason": scan_reason})
+                                   "signal_type": signal_type, "scan_reason": scan_reason,
+                                   "pct_from_30d_high": pct_from_30d_high})
         market_scan_payload.append({
             "symbol": sym, "current_price": float(row['lastPrice']),
             "volume_24h": float(row['quoteVolume']), "price_change_24h_pct": float(row['priceChangePercent']),
@@ -838,6 +842,12 @@ def run_scan_cycle(client: SupabaseRestClient):
         and r["symbol"] not in held_symbols
         and r["symbol"] not in losing_cooldown_symbols
         and get_category(r["symbol"]) != "STABLE"
+        # v6 FIX: zirveden alımı engelle — kullanıcı isteği üzerine eklendi.
+        # Puan cezası (yukarıdaki Gemini prompt'unda -15) tek başına yetmedi;
+        # bu SERT bir filtre, AI skoru ne olursa olsun 30 günlük zirveye
+        # PEAK_PROXIMITY_PENALTY_PCT (%3) kadar veya daha yakın adayları
+        # tamamen eler.
+        and r.get("pct_from_30d_high", 100.0) >= PEAK_PROXIMITY_PENALTY_PCT
         and held_category_counts[get_category(r["symbol"])] < MAX_PER_CATEGORY.get(get_category(r["symbol"]), 3)
     ]
     candidates.sort(key=lambda r: r["ai_score"], reverse=True)
