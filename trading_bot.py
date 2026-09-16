@@ -364,13 +364,30 @@ def fetch_try_pairs_yahoo_fallback() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-MIN_QUOTE_VOLUME_TRY = 500000  # v4 FIX: eskiden 50.000'di — bu kadar düşük bir
-# eşik, saatlerce tek işlem görmeyen (bu yüzden "lastPrice" fiyatı donmuş
-# kalan) parazit pariteleri de tarama evrenine sokuyordu. Gerçek raporlarda
-# TOMOTRY/FRONTTRY/JOETRY/EOSTRY/WAVESTRY gibi pozisyonlar 10+ saat boyunca
-# fiyatı hiç değişmeden açık kaldı — kod hatası değil, coinin gerçekten
-# işlem görmemesiydi. Daha yüksek bir hacim tabanı, sermayenin fiyatı
-# gerçekten hareket eden paritelere gitmesini sağlar.
+MIN_QUOTE_VOLUME_TRY = 5000000  # v5 FIX: 500.000'den 5.000.000'a yükseltildi.
+# Gerekçe: v4'teki 500.000 eşiği de yetersiz kaldı (kullanıcı geri bildirimi:
+# aynı donuk-fiyat sorunu devam etti). Karşılaştırma için: benzer bir Binance
+# TR bot projesi (github.com/cihancosgun/binancetrbot) taban likidite
+# filtresini tam olarak 5.000.000 TL kullanıyor — bu daha gerçekçi bir eşik.
+# NOT: Bu tek başına yeterli değil, çünkü 24 saatlik TOPLAM hacim yüksek
+# görünse bile son 1 saatte coin tamamen ölü olabilir (örn. günün başında
+# tek bir büyük işlemle hacim şişmiş, sonra hiç işlem olmamış). Bu yüzden
+# aşağıya ikinci bir kontrol eklendi: is_recently_active() — son kline'da
+# gerçek hacim var mı diye bakıyor, sadece 24h toplamına güvenmiyor.
+
+
+def is_recently_active(symbol: str) -> bool:
+    """Coin'in son birkaç saatte GERÇEKTEN işlem gördüğünü doğrular.
+    24 saatlik toplam hacim yüksek görünse bile, o hacim saatler önce tek
+    bir patlamada oluşmuş ve o zamandan beri fiyat donmuş olabilir — tam
+    olarak TOMOTRY/FRONTTRY/JOETRY/EOSTRY/WAVESTRY'de gördüğümüz durum.
+    Son 3 saatlik 1h mumun HİÇBİRİNDE işlem hacmi yoksa (veya kline verisi
+    hiç gelmiyorsa) coin 'ölü' kabul edilip elenir."""
+    df = fetch_klines(symbol, interval="1h", limit=3)
+    if df.empty:
+        return False
+    recent_volume_sum = df["volume"].sum()
+    return recent_volume_sum > 0
 
 
 def build_scan_universe(df_all: pd.DataFrame) -> pd.DataFrame:
@@ -839,6 +856,16 @@ def run_scan_cycle(client: SupabaseRestClient):
     for candidate in final_candidates:
         if remaining_cash < MIN_TRADE_AMOUNT_TRY:
             break
+
+        # v5 FIX: alımdan hemen önce son kez "gerçekten işlem görüyor mu"
+        # kontrolü — 24h hacim filtresini geçmiş olsa bile son saatlerde
+        # ölü olabilir (bkz. is_recently_active tanımı ve v5 notu).
+        if not is_recently_active(candidate["symbol"]):
+            logger.warning(
+                f"{candidate['symbol']}: 24h hacim filtresini geçti ama son saatlerde "
+                f"gerçek işlem hacmi yok (muhtemelen fiyat donmuş) — alım İPTAL edildi."
+            )
+            continue
 
         amount_try = get_position_size_try(remaining_cash, candidate["ai_score"])
         buy_fee = amount_try * FEE_RATE
