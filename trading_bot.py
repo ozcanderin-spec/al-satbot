@@ -37,7 +37,16 @@ gerektireceğinden pratik değildir.
 ==============================================================================
 """
 
-
+import os
+import json
+import logging
+import requests
+import pandas as pd
+import yfinance as yf
+from google import genai
+from google.genai import types as genai_types
+from typing import List, Dict, Any, Set, Optional
+from collections import Counter
 
 # ------------------------------------------------------------------------------
 # 1. YAPILANDIRMA & ORTAM DEĞİŞKENLERİ
