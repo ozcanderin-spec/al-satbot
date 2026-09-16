@@ -70,9 +70,9 @@ BINANCE_TICKER_URLS = [
 ]
 
 # --- Strateji sabitleri (bot_config tablosunda karşılığı YOKSA bu varsayılanlar kullanılır) ---
-STOP_LOSS_PERCENT_DEFAULT = 2.0        # giriş fiyatına göre zarar durdurma (kâr %3'e ulaşana kadar)
+STOP_LOSS_PERCENT_DEFAULT = 2.0        # Sabit stop-loss (kâr %3'e ulaşana kadar)
 TRAILING_ACTIVATION_PCT_DEFAULT = 3.0  # Bu kâr yüzdesinden sonra iz süren stop devreye girer
-TRAILING_DISTANCE_PCT_DEFAULT = 1.2    # pozisyon açıldıktan sonra gözlemlediği en yüksek fiyattan geri çekilince iz süren stop
+TRAILING_DISTANCE_PCT_DEFAULT = 1.2    # Zirveden bu yüzde kadar geri çekilince iz süren stop
 FEE_RATE = 0.001                        # Binance standart %0.1 komisyon
 MAX_UNIVERSE_SIZE = 250                 # Ucuz taramada bakılacak azami parite sayısı
 MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detaylı analiz edilecek azami sayı
@@ -520,19 +520,56 @@ def get_market_regime() -> str:
 # 5. POZİSYON İZLEME: STOP-LOSS / İZ SÜREN STOP (sabit take-profit YOK —
 #    kâr %3'ü geçince iz süren stop devreye girip yükselişten sonuna kadar faydalanmaya çalışır)
 # ------------------------------------------------------------------------------
+def _resolve_config_pct(config: Dict[str, Any], candidate_keys: List[str], default: float) -> tuple:
+    """Bir yüzde ayarını, olası birden fazla kolon adı varyantı arasından
+    sırayla okur ve (değer, hangi_alandan_geldiği) döner.
+
+    v6 FIX: Supabase denetiminde bot_config tablosunda "trailing_stop_pct"
+    diye bir alan bulundu, ama kod "trailing_distance_pct" okuyordu — isim
+    uyuşmazlığı yüzünden kullanıcının Supabase'de ayarladığı gerçek değer
+    hiç kullanılmıyor, sessizce koddaki varsayılana düşülüyordu. Artık
+    kod birden fazla olası ismi sırayla deniyor VE hangisinin kullanıldığı
+    (veya hiçbiri bulunamayıp varsayılana düşüldüğü) açıkça loglanıyor —
+    bir daha "hangi değer gerçekten etkili?" sorusu kör noktada kalmasın.
+    """
+    for key in candidate_keys:
+        raw = config.get(key)
+        if raw is not None:
+            try:
+                return float(raw), key
+            except (TypeError, ValueError):
+                continue
+    return default, None
+
+
 def monitor_and_close_positions(client: SupabaseRestClient, config: Dict[str, Any]):
     logger.info("--- Açık pozisyonlar izleniyor (stop-loss / iz süren stop) ---")
 
     # v3 FIX: eşikler artık bot_config'ten okunuyor (önceden config hiç
     # kullanılmıyordu ve stop-loss/trailing her zaman sabit değerlerle
     # çalışıyordu — dashboard'dan girilen değerler etkisizdi).
-    stop_loss_percent = float(config.get("stop_loss_percent") or STOP_LOSS_PERCENT_DEFAULT)
-    trailing_activation_pct = float(config.get("trailing_activation_pct") or TRAILING_ACTIVATION_PCT_DEFAULT)
-    trailing_distance_pct = float(config.get("trailing_distance_pct") or TRAILING_DISTANCE_PCT_DEFAULT)
-    logger.info(
-        f"Aktif eşikler — Stop-Loss: %{stop_loss_percent} | "
-        f"Trailing aktivasyon: %{trailing_activation_pct} | Trailing mesafe: %{trailing_distance_pct}"
+    stop_loss_percent, sl_source = _resolve_config_pct(
+        config, ["stop_loss_percent", "stop_loss_pct"], STOP_LOSS_PERCENT_DEFAULT)
+    trailing_activation_pct, ta_source = _resolve_config_pct(
+        config, ["trailing_activation_pct", "trailing_activation_percent"], TRAILING_ACTIVATION_PCT_DEFAULT)
+    trailing_distance_pct, td_source = _resolve_config_pct(
+        config,
+        ["trailing_distance_pct", "trailing_stop_pct", "trailing_stop_distance_pct"],
+        TRAILING_DISTANCE_PCT_DEFAULT,
     )
+    logger.info(
+        f"Aktif eşikler — Stop-Loss: %{stop_loss_percent} (kaynak: {sl_source or 'VARSAYILAN'}) | "
+        f"Trailing aktivasyon: %{trailing_activation_pct} (kaynak: {ta_source or 'VARSAYILAN'}) | "
+        f"Trailing mesafe: %{trailing_distance_pct} (kaynak: {td_source or 'VARSAYILAN'})"
+    )
+    if td_source == "trailing_stop_pct":
+        logger.warning(
+            "bot_config.trailing_distance_pct bulunamadı, bunun yerine "
+            "bot_config.trailing_stop_pct kullanıldı. Supabase'de her iki "
+            "alan da mevcutsa hangisinin doğru/güncel olduğunu netleştirip "
+            "diğerini silmeniz önerilir — aksi halde ikisi arasında hangi "
+            "değerin geçerli olduğu her seferinde belirsiz kalır."
+        )
 
     open_positions = client.get_open_positions()
     if not open_positions:
