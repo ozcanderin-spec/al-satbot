@@ -20,7 +20,7 @@ v3 DEĞİŞİKLİKLERİ (bug fix turu):
    kaldırıldı (zaten fetch_live_price ile ayrı ayrı çekiliyordu).
 
 Gereksinimler:
-pip install requests pandas google-generativeai yfinance
+pip install requests pandas google-genai yfinance
 
 Ortam Değişkenleri (GitHub Actions Secrets üzerinden sağlanır):
 - SUPABASE_URL
@@ -43,7 +43,8 @@ import logging
 import requests
 import pandas as pd
 import yfinance as yf
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from typing import List, Dict, Any, Set, Optional
 from collections import Counter
 
@@ -94,9 +95,13 @@ if not SUPABASE_URL or not SUPABASE_KEY or not GEMINI_API_KEY:
     logger.error("Eksik ortam değişkeni! SUPABASE_URL, SUPABASE_KEY ve GEMINI_API_KEY gerekli.")
     raise SystemExit(1)
 
-genai.configure(api_key=GEMINI_API_KEY)
+# v4 FIX: google.generativeai paketi Google tarafından kullanımdan
+# kaldırıldı (GitHub Actions loglarında FutureWarning görüldü — "All
+# support for the google.generativeai package has ended"). Yeni birleşik
+# google.genai SDK'sına geçildi; istemci ve model çağırma şekli değişti
+# ama fonksiyonel davranış (JSON çıktı zorlaması) korunuyor.
 MODEL_NAME = "gemini-flash-lite-latest"  # "flash-latest" günde sadece 20 ücretsiz istekle sınırlıydı; "lite" çok daha yüksek ücretsiz kota sunuyor
-model = genai.GenerativeModel(model_name=MODEL_NAME, generation_config={"response_mime_type": "application/json"})
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 def get_category(symbol: str) -> str:
@@ -359,9 +364,18 @@ def fetch_try_pairs_yahoo_fallback() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+MIN_QUOTE_VOLUME_TRY = 500000  # v4 FIX: eskiden 50.000'di — bu kadar düşük bir
+# eşik, saatlerce tek işlem görmeyen (bu yüzden "lastPrice" fiyatı donmuş
+# kalan) parazit pariteleri de tarama evrenine sokuyordu. Gerçek raporlarda
+# TOMOTRY/FRONTTRY/JOETRY/EOSTRY/WAVESTRY gibi pozisyonlar 10+ saat boyunca
+# fiyatı hiç değişmeden açık kaldı — kod hatası değil, coinin gerçekten
+# işlem görmemesiydi. Daha yüksek bir hacim tabanı, sermayenin fiyatı
+# gerçekten hareket eden paritelere gitmesini sağlar.
+
+
 def build_scan_universe(df_all: pd.DataFrame) -> pd.DataFrame:
     """Yükselenler + düşenler + en hacimliler listelerinden ~250'ye kadar aday toplar."""
-    liquid = df_all[df_all['quoteVolume'] > 50000].copy()
+    liquid = df_all[df_all['quoteVolume'] > MIN_QUOTE_VOLUME_TRY].copy()
     if liquid.empty:
         liquid = df_all.copy()
 
@@ -681,7 +695,11 @@ SADECE aşağıdaki JSON formatında geçerli bir liste döndür, başka hiçbir
 ]
 """
     try:
-        response = model.generate_content(prompt)
+        response = genai_client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(response_mime_type="application/json"),
+        )
     except Exception as e:
         # API çağrısının kendisi başarısız oldu (örn. model bulunamadı, kota, ağ hatası).
         # Bunu SESSİZCE geçmiyoruz — tüm coinlerin sahte "50" puanıyla günlerce
