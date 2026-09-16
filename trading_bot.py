@@ -70,9 +70,9 @@ BINANCE_TICKER_URLS = [
 ]
 
 # --- Strateji sabitleri (bot_config tablosunda karşılığı YOKSA bu varsayılanlar kullanılır) ---
-STOP_LOSS_PERCENT_DEFAULT = 2.0        # Sabit stop-loss (kâr %3'e ulaşana kadar)
+STOP_LOSS_PERCENT_DEFAULT = 2.0        # giriş fiyatına göre zarar durdurma (kâr %3'e ulaşana kadar)
 TRAILING_ACTIVATION_PCT_DEFAULT = 3.0  # Bu kâr yüzdesinden sonra iz süren stop devreye girer
-TRAILING_DISTANCE_PCT_DEFAULT = 1.2    # Zirveden bu yüzde kadar geri çekilince iz süren stop
+TRAILING_DISTANCE_PCT_DEFAULT = 1.2    # pozisyon açıldıktan sonra gözlemlediği en yüksek fiyattan geri çekilince iz süren stop
 FEE_RATE = 0.001                        # Binance standart %0.1 komisyon
 MAX_UNIVERSE_SIZE = 250                 # Ucuz taramada bakılacak azami parite sayısı
 MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detaylı analiz edilecek azami sayı
