@@ -79,6 +79,13 @@ MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detayl�
 LOSS_COOLDOWN_HOURS = 3                 # Zararla kapanan bir coin bu süre boyunca tekrar alınmaz
 MIN_TRADE_AMOUNT_TRY = 100.0            # Minimum işlem tutarı
 PEAK_PROXIMITY_PENALTY_PCT = 3.0        # 30 günlük zirveye bu kadar yakınsa puan kırılır
+MAX_24H_CHANGE_FOR_BUY_PCT = 12.0       # v7 FIX: 24 saatte bu yüzdeden fazla artmış coin
+                                          # ALINMAZ — "yükselişin sonunda alım" sorununu
+                                          # önlemek için (kullanıcı geri bildirimi).
+MAX_HOURLY_VOLATILITY_PCT = 6.0         # v7 FIX: son 20 saatlik ortalama (high-low)/close
+                                          # oranı bu değeri aşan coinler ALINMAZ — çok sert/
+                                          # gappy hareket eden coinlerde stop-loss iki kontrol
+                                          # arasında büyük farkla aşılıyordu (%2 yerine -4/-5%).
 
 # Canlı fiyat çekimi için deneme ayarları
 PRICE_FETCH_TIMEOUT_SECONDS = 12
@@ -146,7 +153,7 @@ class SupabaseRestClient:
     def get_open_positions(self) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/rest/v1/trades"
         params = {
-            "select": "id,symbol,entry_price,quantity,total_amount,highest_price_reached",
+            "select": "id,symbol,entry_price,quantity,total_amount,highest_price_reached,created_at",
             "is_active": "eq.true",
         }
         try:
@@ -464,13 +471,21 @@ def compute_rsi(closes: pd.Series, period: int = 14) -> float:
 
 
 def compute_indicators(symbol: str) -> Dict[str, Any]:
-    """RSI(14), EMA20/50 trendi, hacim oranı (1 saatlik) + 30 günlük zirveye yakınlık."""
+    """RSI(14), EMA20/50 trendi, hacim oranı (1 saatlik), 30 günlük zirveye
+    yakınlık + saatlik volatilite (v7 FIX: aşırı oynak/gappy coinleri
+    ayıklamak için — kullanıcı geri bildirimi: %2 stop-loss, hızlı ve sert
+    fiyat sıçramaları yüzünden -4/-5% gibi seviyelerde gerçekleşiyordu)."""
     df_1h = fetch_klines(symbol, interval="1h", limit=60)
-    result = {"rsi": 50.0, "trend": "BİLİNMİYOR", "volume_ratio": 1.0, "pct_from_30d_high": 0.0}
+    result = {
+        "rsi": 50.0, "trend": "BİLİNMİYOR", "volume_ratio": 1.0,
+        "pct_from_30d_high": 0.0, "avg_hourly_range_pct": 0.0,
+    }
 
     if not df_1h.empty and len(df_1h) >= 21:
         closes = df_1h["close"]
         volumes = df_1h["volume"]
+        highs = df_1h["high"]
+        lows = df_1h["low"]
         result["rsi"] = compute_rsi(closes, 14)
         ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
         ema50 = closes.ewm(span=50, adjust=False).mean().iloc[-1] if len(closes) >= 50 else closes.mean()
@@ -486,6 +501,12 @@ def compute_indicators(symbol: str) -> Dict[str, Any]:
         recent_volume = volumes.iloc[-1]
         avg_volume = volumes.iloc[-21:-1].mean() if len(volumes) >= 21 else volumes.mean()
         result["volume_ratio"] = round(recent_volume / avg_volume, 2) if avg_volume else 1.0
+        # Son 20 saatlik mumun (high-low)/close oranının ortalaması — coin'in
+        # ne kadar "sert/gappy" hareket ettiğinin basit bir ölçüsü. Yüksek
+        # değer = fiyat saat içinde büyük sıçramalar yapıyor = stop-loss'un
+        # iki kontrol arasında büyük farkla aşılma riski yüksek.
+        recent_ranges_pct = ((highs - lows) / closes.replace(0, pd.NA)).tail(20) * 100
+        result["avg_hourly_range_pct"] = round(float(recent_ranges_pct.mean()), 2) if not recent_ranges_pct.empty else 0.0
 
     df_1d = fetch_klines(symbol, interval="1d", limit=30)
     if not df_1d.empty:
@@ -495,6 +516,7 @@ def compute_indicators(symbol: str) -> Dict[str, Any]:
             result["pct_from_30d_high"] = round(((high_30d - last_close_1d) / high_30d) * 100, 2)
 
     return result
+
 
 
 def get_market_regime() -> str:
@@ -540,6 +562,37 @@ def _resolve_config_pct(config: Dict[str, Any], candidate_keys: List[str], defau
             except (TypeError, ValueError):
                 continue
     return default, None
+
+
+def fetch_high_since_entry(symbol: str, entry_time_iso: Optional[str]) -> Optional[float]:
+    """v7 FIX: Sadece anlık ticker fiyatına bakarak zirve takip etmek, iki
+    kontrol arasında (poll interval) oluşup geri dönen fiyat sıçramalarını
+    TAMAMEN kaçırıyordu — kullanıcı geri bildirimi: bir pozisyon %+13'e
+    çıktı ama trailing hiç tetiklenmeden zararına kapandı, çünkü botun o
+    gerçek zirveyi gördüğü bir an hiç olmadı. Bu fonksiyon, 5 dakikalık
+    Binance mum (kline) verisinin GERÇEK 'high' değerlerini kullanarak,
+    giriş anından bu yana oluşmuş asıl zirveyi geriye dönük yeniden kurar
+    — kontrol sıklığından bağımsız olarak."""
+    if not entry_time_iso:
+        return None
+    try:
+        entry_dt = pd.Timestamp(entry_time_iso)
+        if entry_dt.tzinfo is None:
+            entry_dt = entry_dt.tz_localize("UTC")
+        minutes_open = max(1, int((pd.Timestamp.now("UTC") - entry_dt).total_seconds() // 60))
+        limit = min(1000, minutes_open // 5 + 3)
+        df = fetch_klines(symbol, interval="5m", limit=limit)
+        if df.empty:
+            return None
+        df["open_time"] = pd.to_numeric(df["open_time"], errors="coerce")
+        entry_ms = int(entry_dt.timestamp() * 1000)
+        df_after_entry = df[df["open_time"] >= entry_ms]
+        if df_after_entry.empty:
+            return None
+        return float(df_after_entry["high"].max())
+    except Exception as e:
+        logger.warning(f"{symbol} giriş-sonrası gerçek zirve (kline) hesaplanamadı: {e}")
+        return None
 
 
 def monitor_and_close_positions(client: SupabaseRestClient, config: Dict[str, Any]):
@@ -598,7 +651,10 @@ def monitor_and_close_positions(client: SupabaseRestClient, config: Dict[str, An
         if entry_price <= 0 or quantity <= 0 or total_amount <= 0:
             continue
 
-        live_highest = max(previous_highest, live_price)
+        # v7 FIX: sadece anlık fiyata değil, giriş sonrası kline "high"
+        # verisine de bakarak gerçek zirveyi yakala (bkz. fetch_high_since_entry).
+        kline_high_since_entry = fetch_high_since_entry(symbol, trade.get("created_at"))
+        live_highest = max(previous_highest, live_price, kline_high_since_entry or 0)
         gross_value = quantity * live_price
         live_value = gross_value * (1 - FEE_RATE)
         pnl = live_value - total_amount
@@ -831,11 +887,18 @@ def run_scan_cycle(client: SupabaseRestClient):
         scan_reason = str(ai_data.get("scan_reason", "Teknik tarama tamamlandı."))
         # v6 FIX: 30 günlük zirveye yakınlık bilgisi, alım öncesi sert filtre
         # için kayda ekleniyor (aşağıda candidates listesinde kullanılıyor).
-        pct_from_30d_high = float(indicators_by_symbol.get(sym, {}).get("pct_from_30d_high", 100.0))
+        symbol_indicators = indicators_by_symbol.get(sym, {})
+        pct_from_30d_high = float(symbol_indicators.get("pct_from_30d_high", 100.0))
+        # v7 FIX: "yükselişin sonunda alım" ve aşırı oynaklık sorunları için
+        # iki yeni sert filtre alanı.
+        change_24h_percent = float(row['priceChangePercent'])
+        avg_hourly_range_pct = float(symbol_indicators.get("avg_hourly_range_pct", 0.0))
 
         records_to_upsert.append({"symbol": sym, "price": float(row['lastPrice']), "ai_score": ai_score,
                                    "signal_type": signal_type, "scan_reason": scan_reason,
-                                   "pct_from_30d_high": pct_from_30d_high})
+                                   "pct_from_30d_high": pct_from_30d_high,
+                                   "change_24h_percent": change_24h_percent,
+                                   "avg_hourly_range_pct": avg_hourly_range_pct})
         market_scan_payload.append({
             "symbol": sym, "current_price": float(row['lastPrice']),
             "volume_24h": float(row['quoteVolume']), "price_change_24h_pct": float(row['priceChangePercent']),
@@ -885,6 +948,13 @@ def run_scan_cycle(client: SupabaseRestClient):
         # PEAK_PROXIMITY_PENALTY_PCT (%3) kadar veya daha yakın adayları
         # tamamen eler.
         and r.get("pct_from_30d_high", 100.0) >= PEAK_PROXIMITY_PENALTY_PCT
+        # v7 FIX: "yükselişin sonunda alım" sorunu — 24 saatte zaten çok
+        # yükselmiş (muhtemelen hareketin sonuna yakın) coinleri ele.
+        and r.get("change_24h_percent", 0.0) <= MAX_24H_CHANGE_FOR_BUY_PCT
+        # v7 FIX: volatilite filtresi — çok sert/gappy hareket eden coinler,
+        # stop-loss'un iki kontrol arasında büyük farkla aşılmasına yol
+        # açıyordu (kullanıcı geri bildirimi: %2 yerine -4/-5% ile kapanma).
+        and r.get("avg_hourly_range_pct", 0.0) <= MAX_HOURLY_VOLATILITY_PCT
         and held_category_counts[get_category(r["symbol"])] < MAX_PER_CATEGORY.get(get_category(r["symbol"]), 3)
     ]
     candidates.sort(key=lambda r: r["ai_score"], reverse=True)
