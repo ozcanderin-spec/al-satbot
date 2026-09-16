@@ -98,10 +98,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("BinanceAlgoBot")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.warning("SUPABASE_URL/SUPABASE_KEY bulunamadı; Supabase bağlantısı kurulamazsa script varsayılan ayarlarla çalışmaya devam eder.")
-if not GEMINI_API_KEY:
-    logger.warning("GEMINI_API_KEY bulunamadı; Gemini API yerine yerel fallback skorlaması kullanılacak.")
+if not SUPABASE_URL or not SUPABASE_KEY or not GEMINI_API_KEY:
+    logger.error("Eksik ortam değişkeni! SUPABASE_URL, SUPABASE_KEY ve GEMINI_API_KEY gerekli.")
+    raise SystemExit(1)
 
 # v4 FIX: google.generativeai paketi Google tarafından kullanımdan
 # kaldırıldı (GitHub Actions loglarında FutureWarning görüldü — "All
@@ -109,7 +108,7 @@ if not GEMINI_API_KEY:
 # google.genai SDK'sına geçildi; istemci ve model çağırma şekli değişti
 # ama fonksiyonel davranış (JSON çıktı zorlaması) korunuyor.
 MODEL_NAME = "gemini-flash-lite-latest"  # "flash-latest" günde sadece 20 ücretsiz istekle sınırlıydı; "lite" çok daha yüksek ücretsiz kota sunuyor
-genai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 def get_category(symbol: str) -> str:
@@ -142,17 +141,14 @@ class SupabaseRestClient:
             "trailing_activation_pct": TRAILING_ACTIVATION_PCT_DEFAULT,
             "trailing_distance_pct": TRAILING_DISTANCE_PCT_DEFAULT,
         }
-        if not self.base_url or not self.headers.get("apikey"):
-            logger.warning("Supabase URL/key yok; varsayılan bot_config kullanılacak.")
-            return default
         try:
             resp = requests.get(url, headers=self.headers, params={"select": "*", "limit": 1}, timeout=10)
             resp.raise_for_status()
             data = resp.json()
             return data[0] if data else default
         except Exception as e:
-            logger.warning(f"bot_config okunamadı, varsayılan ayarlar kullanılacak: {e}")
-            return default
+            logger.error(f"bot_config okunamadı: {e}")
+            raise RuntimeError(f"bot_config okunamadı, güvenlik nedeniyle döngü durduruluyor: {e}") from e
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/rest/v1/trades"
@@ -160,15 +156,13 @@ class SupabaseRestClient:
             "select": "id,symbol,entry_price,quantity,total_amount,highest_price_reached,created_at",
             "is_active": "eq.true",
         }
-        if not self.base_url or not self.headers.get("apikey"):
-            return []
         try:
             resp = requests.get(url, headers=self.headers, params=params, timeout=10)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            logger.warning(f"Açık pozisyonlar okunamadı: {e}")
-            return []
+            logger.error(f"Açık pozisyonlar okunamadı: {e}")
+            raise RuntimeError(f"Açık pozisyonlar okunamadı, güvenlik nedeniyle döngü durduruluyor: {e}") from e
 
     def get_recent_losing_symbols(self, cooldown_hours: int) -> Set[str]:
         url = f"{self.base_url}/rest/v1/trades"
@@ -178,8 +172,6 @@ class SupabaseRestClient:
             "order": "closed_at.desc",
             "limit": "200",
         }
-        if not self.base_url or not self.headers.get("apikey"):
-            return set()
         try:
             resp = requests.get(url, headers=self.headers, params=params, timeout=10)
             resp.raise_for_status()
@@ -193,10 +185,7 @@ class SupabaseRestClient:
         for r in rows:
             try:
                 pnl = float(r.get("realized_pnl") or 0)
-                closed_at_raw = r.get("closed_at")
-                if closed_at_raw is None:
-                    continue
-                closed_at = pd.Timestamp(closed_at_raw)
+                closed_at = pd.Timestamp(r["closed_at"])
                 if closed_at.tzinfo is None:
                     closed_at = closed_at.tz_localize("UTC")
                 if pnl < 0 and closed_at >= cutoff:
@@ -213,8 +202,6 @@ class SupabaseRestClient:
             "order": "closed_at.desc",
             "limit": str(limit),
         }
-        if not self.base_url or not self.headers.get("apikey"):
-            return []
         try:
             resp = requests.get(url, headers=self.headers, params=params, timeout=10)
             resp.raise_for_status()
@@ -228,23 +215,22 @@ class SupabaseRestClient:
         payload: Dict[str, Any] = {"highest_price_reached": highest_price_reached}
         if trailing_stop_price is not None:
             payload["trailing_stop_price"] = trailing_stop_price
-        if not self.base_url or not self.headers.get("apikey"):
-            return
         try:
             requests.patch(url, headers=self.headers, params={"id": f"eq.{trade_id}"}, json=payload, timeout=10)
         except Exception as e:
             logger.warning(f"Zirve fiyat güncellenemedi ({trade_id}): {e}")
 
     def close_trade(self, trade_id: str, exit_price: float, realized_pnl: float, reason: str) -> bool:
+        # NOT: exit_price burada gerçek canlı fiyat olarak gönderiliyor.
+        # Rapor/dashboard tarafında "Çıkış Fiyatı" giriş fiyatıyla aynı
+        # görünüyorsa bu, dashboard'un yanlış alanı okumasından kaynaklanır
+        # (bkz. proje notları) — bu satır zaten doğru değeri yazıyor.
         url = f"{self.base_url}/rest/v1/trades"
         payload = {
             "is_active": False, "status": "FILLED", "exit_price": exit_price,
             "realized_pnl": realized_pnl, "notes": reason,
             "closed_at": pd.Timestamp.now('UTC').isoformat(),
         }
-        if not self.base_url or not self.headers.get("apikey"):
-            logger.warning(f"Supabase bağlantısı yok; {trade_id} kapanamadı.")
-            return False
         try:
             resp = requests.patch(url, headers=self.headers, params={"id": f"eq.{trade_id}"}, json=payload, timeout=10)
             if resp.status_code in (200, 201, 204):
@@ -260,9 +246,6 @@ class SupabaseRestClient:
         if not records:
             return True
         url = f"{self.base_url}/rest/v1/market_scans"
-        if not self.base_url or not self.headers.get("apikey"):
-            logger.warning("Supabase bağlantısı yok; market_scans yazılamadı.")
-            return False
         try:
             response = requests.post(url, headers=self.headers, json=records, timeout=20)
             if response.status_code in (200, 201):
@@ -276,9 +259,6 @@ class SupabaseRestClient:
 
     def insert_trade(self, record: Dict[str, Any], position_pct: float = 0) -> bool:
         url = f"{self.base_url}/rest/v1/trades"
-        if not self.base_url or not self.headers.get("apikey"):
-            logger.warning(f"Supabase bağlantısı yok; {record.get('symbol')} alımı yazılamadı.")
-            return False
         try:
             response = requests.post(url, headers=self.headers, json=record, timeout=15)
             if response.status_code in (200, 201):
@@ -315,18 +295,10 @@ def fetch_all_try_data() -> pd.DataFrame:
         return fetch_try_pairs_yahoo_fallback()
 
     df = pd.DataFrame(raw_data)
-    if df.empty:
-        logger.warning("Binance ticker yanıtı boş döndü; boş dataframe döndürüldü.")
-        return df
-
-    if "symbol" in df.columns:
-        df["symbol"] = df["symbol"].astype(str)
-
     numeric_cols = ['lastPrice', 'priceChangePercent', 'volume', 'quoteVolume', 'highPrice', 'lowPrice']
     for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-    df_try = df[df['symbol'].str.endswith('TRY')].copy() if 'symbol' in df.columns else pd.DataFrame()
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df_try = df[df['symbol'].str.endswith('TRY')].copy()
     logger.info(f"Binance'ten toplam {len(df_try)} TRY paritesi çekildi.")
     return df_try
 
@@ -347,12 +319,14 @@ def fetch_live_price(symbol: str) -> Optional[float]:
                 resp = requests.get(url, params={"symbol": symbol}, timeout=PRICE_FETCH_TIMEOUT_SECONDS)
                 status = resp.status_code
                 if status == 451:
+                    # Bilinen sorun: bazı GitHub Actions runner IP'leri Binance
+                    # tarafından coğrafi/hukuki kısıtlama (451) ile engellenir.
                     logger.error(
                         f"{symbol}: {url} adresinden 451 (erişim engellendi) yanıtı alındı "
                         f"— muhtemelen runner IP'si Binance tarafından kısıtlanmış."
                     )
                     last_error = f"HTTP 451 @ {url}"
-                    break
+                    break  # bu URL'de tekrar denemenin anlamı yok, diğer URL'ye geç
                 resp.raise_for_status()
                 data = resp.json()
                 price = float(data.get("lastPrice", 0))
@@ -398,9 +372,24 @@ def fetch_try_pairs_yahoo_fallback() -> pd.DataFrame:
 
 
 MIN_QUOTE_VOLUME_TRY = 5000000  # v5 FIX: 500.000'den 5.000.000'a yükseltildi.
+# Gerekçe: v4'teki 500.000 eşiği de yetersiz kaldı (kullanıcı geri bildirimi:
+# aynı donuk-fiyat sorunu devam etti). Karşılaştırma için: benzer bir Binance
+# TR bot projesi (github.com/cihancosgun/binancetrbot) taban likidite
+# filtresini tam olarak 5.000.000 TL kullanıyor — bu daha gerçekçi bir eşik.
+# NOT: Bu tek başına yeterli değil, çünkü 24 saatlik TOPLAM hacim yüksek
+# görünse bile son 1 saatte coin tamamen ölü olabilir (örn. günün başında
+# tek bir büyük işlemle hacim şişmiş, sonra hiç işlem olmamış). Bu yüzden
+# aşağıya ikinci bir kontrol eklendi: is_recently_active() — son kline'da
+# gerçek hacim var mı diye bakıyor, sadece 24h toplamına güvenmiyor.
 
 
 def is_recently_active(symbol: str) -> bool:
+    """Coin'in son birkaç saatte GERÇEKTEN işlem gördüğünü doğrular.
+    24 saatlik toplam hacim yüksek görünse bile, o hacim saatler önce tek
+    bir patlamada oluşmuş ve o zamandan beri fiyat donmuş olabilir — tam
+    olarak TOMOTRY/FRONTTRY/JOETRY/EOSTRY/WAVESTRY'de gördüğümüz durum.
+    Son 3 saatlik 1h mumun HİÇBİRİNDE işlem hacmi yoksa (veya kline verisi
+    hiç gelmiyorsa) coin 'ölü' kabul edilip elenir."""
     df = fetch_klines(symbol, interval="1h", limit=3)
     if df.empty:
         return False
@@ -409,6 +398,7 @@ def is_recently_active(symbol: str) -> bool:
 
 
 def build_scan_universe(df_all: pd.DataFrame) -> pd.DataFrame:
+    """Yükselenler + düşenler + en hacimliler listelerinden ~250'ye kadar aday toplar."""
     liquid = df_all[df_all['quoteVolume'] > MIN_QUOTE_VOLUME_TRY].copy()
     if liquid.empty:
         liquid = df_all.copy()
@@ -424,13 +414,14 @@ def build_scan_universe(df_all: pd.DataFrame) -> pd.DataFrame:
 
 
 def shortlist_for_detailed_analysis(universe: pd.DataFrame, excluded_symbols: Set[str]) -> pd.DataFrame:
+    """250'lik evrenden, gerçek gösterge hesaplamaya değecek en umut vadeden ~40 adayı seçer
+    (ucuz/hızlı bir puanla önce elenir, pahalı analiz sadece bunlara yapılır)."""
     df = universe[~universe['symbol'].isin(excluded_symbols)].copy()
     df = df[df['symbol'].apply(lambda s: get_category(s) != "STABLE")]
 
-    if df.empty:
-        return df
-
     vol_norm = (df['quoteVolume'] / df['quoteVolume'].max()).fillna(0) if df['quoteVolume'].max() else 0
+    # NOT: Burada .abs() KULLANMIYORUZ — amaç yükselen coinleri öne çıkarmak.
+    # abs() kullanılsaydı çöken coinler de "ilginç" sayılıp listeyi kirletirdi.
     positive_change = df['priceChangePercent'].clip(lower=0)
     change_norm = (positive_change / positive_change.max()).fillna(0) if positive_change.max() else 0
     df['quick_score'] = vol_norm * 0.5 + change_norm * 0.5
@@ -480,6 +471,10 @@ def compute_rsi(closes: pd.Series, period: int = 14) -> float:
 
 
 def compute_indicators(symbol: str) -> Dict[str, Any]:
+    """RSI(14), EMA20/50 trendi, hacim oranı (1 saatlik), 30 günlük zirveye
+    yakınlık + saatlik volatilite (v7 FIX: aşırı oynak/gappy coinleri
+    ayıklamak için — kullanıcı geri bildirimi: %2 stop-loss, hızlı ve sert
+    fiyat sıçramaları yüzünden -4/-5% gibi seviyelerde gerçekleşiyordu)."""
     df_1h = fetch_klines(symbol, interval="1h", limit=60)
     result = {
         "rsi": 50.0, "trend": "BİLİNMİYOR", "volume_ratio": 1.0,
@@ -506,6 +501,10 @@ def compute_indicators(symbol: str) -> Dict[str, Any]:
         recent_volume = volumes.iloc[-1]
         avg_volume = volumes.iloc[-21:-1].mean() if len(volumes) >= 21 else volumes.mean()
         result["volume_ratio"] = round(recent_volume / avg_volume, 2) if avg_volume else 1.0
+        # Son 20 saatlik mumun (high-low)/close oranının ortalaması — coin'in
+        # ne kadar "sert/gappy" hareket ettiğinin basit bir ölçüsü. Yüksek
+        # değer = fiyat saat içinde büyük sıçramalar yapıyor = stop-loss'un
+        # iki kontrol arasında büyük farkla aşılma riski yüksek.
         recent_ranges_pct = ((highs - lows) / closes.replace(0, pd.NA)).tail(20) * 100
         result["avg_hourly_range_pct"] = round(float(recent_ranges_pct.mean()), 2) if not recent_ranges_pct.empty else 0.0
 
@@ -517,6 +516,7 @@ def compute_indicators(symbol: str) -> Dict[str, Any]:
             result["pct_from_30d_high"] = round(((high_30d - last_close_1d) / high_30d) * 100, 2)
 
     return result
+
 
 
 def get_market_regime() -> str:
@@ -543,6 +543,17 @@ def get_market_regime() -> str:
 #    kâr %3'ü geçince iz süren stop devreye girip yükselişten sonuna kadar faydalanmaya çalışır)
 # ------------------------------------------------------------------------------
 def _resolve_config_pct(config: Dict[str, Any], candidate_keys: List[str], default: float) -> tuple:
+    """Bir yüzde ayarını, olası birden fazla kolon adı varyantı arasından
+    sırayla okur ve (değer, hangi_alandan_geldiği) döner.
+
+    v6 FIX: Supabase denetiminde bot_config tablosunda "trailing_stop_pct"
+    diye bir alan bulundu, ama kod "trailing_distance_pct" okuyordu — isim
+    uyuşmazlığı yüzünden kullanıcının Supabase'de ayarladığı gerçek değer
+    hiç kullanılmıyor, sessizce koddaki varsayılana düşülüyordu. Artık
+    kod birden fazla olası ismi sırayla deniyor VE hangisinin kullanıldığı
+    (veya hiçbiri bulunamayıp varsayılana düşüldüğü) açıkça loglanıyor —
+    bir daha "hangi değer gerçekten etkili?" sorusu kör noktada kalmasın.
+    """
     for key in candidate_keys:
         raw = config.get(key)
         if raw is not None:
@@ -554,6 +565,14 @@ def _resolve_config_pct(config: Dict[str, Any], candidate_keys: List[str], defau
 
 
 def fetch_high_since_entry(symbol: str, entry_time_iso: Optional[str]) -> Optional[float]:
+    """v7 FIX: Sadece anlık ticker fiyatına bakarak zirve takip etmek, iki
+    kontrol arasında (poll interval) oluşup geri dönen fiyat sıçramalarını
+    TAMAMEN kaçırıyordu — kullanıcı geri bildirimi: bir pozisyon %+13'e
+    çıktı ama trailing hiç tetiklenmeden zararına kapandı, çünkü botun o
+    gerçek zirveyi gördüğü bir an hiç olmadı. Bu fonksiyon, 5 dakikalık
+    Binance mum (kline) verisinin GERÇEK 'high' değerlerini kullanarak,
+    giriş anından bu yana oluşmuş asıl zirveyi geriye dönük yeniden kurar
+    — kontrol sıklığından bağımsız olarak."""
     if not entry_time_iso:
         return None
     try:
@@ -579,6 +598,9 @@ def fetch_high_since_entry(symbol: str, entry_time_iso: Optional[str]) -> Option
 def monitor_and_close_positions(client: SupabaseRestClient, config: Dict[str, Any]):
     logger.info("--- Açık pozisyonlar izleniyor (stop-loss / iz süren stop) ---")
 
+    # v3 FIX: eşikler artık bot_config'ten okunuyor (önceden config hiç
+    # kullanılmıyordu ve stop-loss/trailing her zaman sabit değerlerle
+    # çalışıyordu — dashboard'dan girilen değerler etkisizdi).
     stop_loss_percent, sl_source = _resolve_config_pct(
         config, ["stop_loss_percent", "stop_loss_pct"], STOP_LOSS_PERCENT_DEFAULT)
     trailing_activation_pct, ta_source = _resolve_config_pct(
@@ -629,6 +651,8 @@ def monitor_and_close_positions(client: SupabaseRestClient, config: Dict[str, An
         if entry_price <= 0 or quantity <= 0 or total_amount <= 0:
             continue
 
+        # v7 FIX: sadece anlık fiyata değil, giriş sonrası kline "high"
+        # verisine de bakarak gerçek zirveyi yakala (bkz. fetch_high_since_entry).
         kline_high_since_entry = fetch_high_since_entry(symbol, trade.get("created_at"))
         live_highest = max(previous_highest, live_price, kline_high_since_entry or 0)
         gross_value = quantity * live_price
@@ -676,6 +700,8 @@ def get_available_cash(config: Dict[str, Any], open_positions: List[Dict[str, An
 
 
 def get_position_size_try(available_cash: float, ai_score: int) -> float:
+    """Sabit tutar yerine, güven skoruna göre kademeli, bakiyenin yüzdesi olarak pozisyon büyüklüğü.
+    100 TL'lik cüzdanla 10.000 TL'lik cüzdan orantısal olarak aynı davranır."""
     if ai_score >= 90:
         pct = 0.14
     elif ai_score >= 80:
@@ -709,62 +735,6 @@ def log_performance_summary(client: SupabaseRestClient):
     )
 
 
-def _fallback_score_market(shortlist: pd.DataFrame, indicators_by_symbol: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    results = []
-    for _, row in shortlist.iterrows():
-        symbol = row['symbol']
-        indicators = indicators_by_symbol.get(symbol, {})
-        rsi = float(indicators.get('rsi', 50.0))
-        trend = str(indicators.get('trend', 'BİLİNMİYOR'))
-        volume_ratio = float(indicators.get('volume_ratio', 1.0))
-        pct_from_30d_high = float(indicators.get('pct_from_30d_high', 100.0))
-        change_24h = float(row.get('priceChangePercent', 0.0))
-
-        score = 50
-        if rsi > 70:
-            score += 18
-        elif 60 <= rsi <= 70:
-            score += 5
-        elif 30 <= rsi <= 40:
-            score -= 8
-        if trend == "GÜÇLÜ_YÜKSELİŞ":
-            score += 20
-        elif trend == "YÜKSELİŞ":
-            score += 3
-        elif trend == "GÜÇLÜ_DÜŞÜŞ":
-            score -= 15
-        elif trend == "DÜŞÜŞ":
-            score -= 3
-        if volume_ratio > 1.5:
-            score += 15 if volume_ratio <= 2 else 22
-        elif volume_ratio < 1.0:
-            score -= 5
-        if change_24h > 15:
-            score -= 10
-        if pct_from_30d_high < 3:
-            score -= 15
-        score = max(0, min(100, score))
-        if score >= 80:
-            signal_type = "STRONG_BUY"
-        elif score >= 65:
-            signal_type = "BUY"
-        elif score >= 40:
-            signal_type = "NEUTRAL"
-        else:
-            signal_type = "SELL"
-
-        scan_reason = (
-            f"RSI {rsi:.1f}, EMA/trend {trend} ve hacim oranı {volume_ratio:.2f} baz alınarak yerel fallback puanlama kullanıldı."
-        )
-        results.append({
-            "symbol": symbol,
-            "ai_score": int(score),
-            "signal_type": signal_type,
-            "scan_reason": scan_reason,
-        })
-    return results
-
-
 # ------------------------------------------------------------------------------
 # 8. GEMINI KARAR VE PUANLAMA MOTORU
 # ------------------------------------------------------------------------------
@@ -787,10 +757,6 @@ def analyze_markets_with_gemini(shortlist: pd.DataFrame, market_regime: str):
             "volume_vs_avg_ratio": indicators["volume_ratio"],
             "pct_below_30d_high": indicators["pct_from_30d_high"],
         })
-
-    if not genai_client or not GEMINI_API_KEY:
-        logger.warning("Gemini client yok; yerel fallback puanlaması devreye alındı.")
-        return _fallback_score_market(shortlist, indicators_by_symbol), indicators_by_symbol
 
     prompt = f"""
 Sen kural tabanlı çalışan bir Kripto Para Teknik Analiz Motorusun. Kendi sezgine göre TAHMİN ETME;
@@ -823,8 +789,8 @@ kullanılmıştır:
 - volume_vs_avg_ratio > 1.5 (LIFT 1.74x — güçlü gerçek sinyal): +15 puan (2x'ten fazlaysa +22 puan ver, orantılı düşün)
 - volume_vs_avg_ratio < 1.0 (LIFT ~0.83x, hafif negatif, iki taraf da benzer): -5 puan
 - change_24h_percent > 15: -10 (aşırı ısınmış, kısa vadeli geri çekilme riski)
-- pct_below_30d_high < 3 (30 günlük ZİRVEYE çok yakın): -15 puan
-- pct_below_30d_high diğer durumlarda: puan etkisi yok
+- pct_below_30d_high < 3 (30 günlük ZİRVEYE çok yakın): -15 puan (v6 FIX: gerçek veri lift'i zayıf çıkmıştı [0.90x] diye -5'e düşürülmüştü, ama canlı işlemlerde zirveden alınan pozisyonlar geri çekilme yaşadı — kullanıcı geri bildirimiyle tekrar güçlü bir ceza olarak ayarlandı. Ayrıca aşağıda run_scan_cycle'da SERT bir filtre de var: zirveye bu kadar yakın adaylar puanları ne olursa olsun ALINMIYOR.)
+- pct_below_30d_high diğer durumlarda: puan etkisi yok (gerçek veri anlamlı bir fark göstermedi)
 
 Puanı 0-100 aralığında sınırla. Sonra:
 "signal_type": "STRONG_BUY" (>=80), "BUY" (>=65), "NEUTRAL" (40-64), "SELL" (<40).
@@ -845,17 +811,22 @@ SADECE aşağıdaki JSON formatında geçerli bir liste döndür, başka hiçbir
             config=genai_types.GenerateContentConfig(response_mime_type="application/json"),
         )
     except Exception as e:
+        # API çağrısının kendisi başarısız oldu (örn. model bulunamadı, kota, ağ hatası).
+        # Bunu SESSİZCE geçmiyoruz — tüm coinlerin sahte "50" puanıyla günlerce
+        # dolaşmasına yol açan asıl sorun buydu. Artık çalışma burada durup
+        # Actions'ta kırmızı görünecek, böylece hemen fark edilir.
         logger.error(f"Gemini API ÇAĞRISI BAŞARISIZ: {e}")
-        logger.warning("Gemini çağrısı başarısız olduğu için yerel fallback puanlama kullanılacak.")
-        return _fallback_score_market(shortlist, indicators_by_symbol), indicators_by_symbol
+        raise RuntimeError(f"Gemini API çağrısı başarısız oldu, döngü durduruluyor: {e}") from e
 
     try:
         ai_results = json.loads(response.text)
         logger.info(f"Gemini {len(ai_results)} parite için analiz tamamladı.")
         return ai_results, indicators_by_symbol
     except Exception as e:
+        # Sadece JSON ayrıştırma hatasıysa (API çalıştı ama format bozuktu),
+        # bu daha ufak/geçici bir sorun olabilir — döngüyü tamamen durdurmuyoruz.
         logger.error(f"Gemini yanıtı ayrıştırılamadı (API çalıştı ama format bozuk): {e}")
-        return _fallback_score_market(shortlist, indicators_by_symbol), indicators_by_symbol
+        return [], indicators_by_symbol
 
 
 # ------------------------------------------------------------------------------
@@ -871,6 +842,9 @@ def run_scan_cycle(client: SupabaseRestClient):
 
     logger.info(f"Mod: {mode} | Acil Durdurma: {emergency_stop} | Min Skor: {min_ai_score}")
 
+    # 1) Önce açık pozisyonları izle/kapat (tarayıcı kapalı olsa bile).
+    # v3 FIX: price_lookup parametresi kaldırıldı — kullanılmıyordu, canlı
+    # fiyat zaten fetch_live_price ile pozisyon bazında doğrudan çekiliyor.
     monitor_and_close_positions(client, config)
 
     if emergency_stop:
@@ -882,6 +856,7 @@ def run_scan_cycle(client: SupabaseRestClient):
         logger.error("Binance verisi boş geldi, yeni tarama/alım döngüsü atlanıyor.")
         return
 
+    # 2) Geniş evreni tara (250'ye kadar), sonra en umut vadeden ~40'ı detaylı analiz et
     universe = build_scan_universe(df_all)
     open_positions = client.get_open_positions()
     held_symbols = {p["symbol"] for p in open_positions}
@@ -896,6 +871,10 @@ def run_scan_cycle(client: SupabaseRestClient):
     market_regime = get_market_regime()
     ai_evaluations, indicators_by_symbol = analyze_markets_with_gemini(shortlist, market_regime)
     ai_dict = {item["symbol"]: item for item in ai_evaluations if "symbol" in item}
+    # NOT: Eşiği burada ayrıca yükseltmiyoruz — Gemini'ye zaten DÜŞÜŞ rejiminde
+    # 70'in üzerine çıkmaması talimatı verildi (yukarıdaki prompt). İkisini üst
+    # üste uygulamak (hem tavan koymak hem eşiği yükseltmek) alım işlemini
+    # matematiksel olarak imkansız hale getiriyordu.
     effective_min_score = min_ai_score
 
     records_to_upsert = []
@@ -906,8 +885,12 @@ def run_scan_cycle(client: SupabaseRestClient):
         ai_score = max(0, min(100, int(ai_data.get("ai_score", 50))))
         signal_type = str(ai_data.get("signal_type", "NEUTRAL"))
         scan_reason = str(ai_data.get("scan_reason", "Teknik tarama tamamlandı."))
+        # v6 FIX: 30 günlük zirveye yakınlık bilgisi, alım öncesi sert filtre
+        # için kayda ekleniyor (aşağıda candidates listesinde kullanılıyor).
         symbol_indicators = indicators_by_symbol.get(sym, {})
         pct_from_30d_high = float(symbol_indicators.get("pct_from_30d_high", 100.0))
+        # v7 FIX: "yükselişin sonunda alım" ve aşırı oynaklık sorunları için
+        # iki yeni sert filtre alanı.
         change_24h_percent = float(row['priceChangePercent'])
         avg_hourly_range_pct = float(symbol_indicators.get("avg_hourly_range_pct", 0.0))
 
@@ -943,6 +926,12 @@ def run_scan_cycle(client: SupabaseRestClient):
         logger.info("Kullanılabilir nakit minimum işlem tutarının altında, yeni alım yapılmayacak.")
         return
 
+    # Çeşitlendirme: her kategoriden makul bir üst sınıra kadar izin ver
+    # (eskisi gibi "kategori başına sadece 1" değil — ALT kategorisi coinlerin
+    # büyük çoğunluğunu kapsadığı için bu, botu neredeyse tamamen durduruyordu).
+    # NOT: MAJOR (BTC, ETH, BNB vb.) coinlerin günlük volatilitesi genelde düşük;
+    # bu hızlı-momentum stratejisi için altcoinler daha uygun fırsat sunuyor.
+    # Bu yüzden MAJOR kapasitesi kasıtlı olarak düşük tutuluyor.
     MAX_PER_CATEGORY = {"MAJOR": 1, "ALT": 7, "STABLE": 0}
 
     held_category_counts = Counter(get_category(s) for s in held_symbols)
@@ -953,8 +942,18 @@ def run_scan_cycle(client: SupabaseRestClient):
         and r["symbol"] not in held_symbols
         and r["symbol"] not in losing_cooldown_symbols
         and get_category(r["symbol"]) != "STABLE"
+        # v6 FIX: zirveden alımı engelle — kullanıcı isteği üzerine eklendi.
+        # Puan cezası (yukarıdaki Gemini prompt'unda -15) tek başına yetmedi;
+        # bu SERT bir filtre, AI skoru ne olursa olsun 30 günlük zirveye
+        # PEAK_PROXIMITY_PENALTY_PCT (%3) kadar veya daha yakın adayları
+        # tamamen eler.
         and r.get("pct_from_30d_high", 100.0) >= PEAK_PROXIMITY_PENALTY_PCT
+        # v7 FIX: "yükselişin sonunda alım" sorunu — 24 saatte zaten çok
+        # yükselmiş (muhtemelen hareketin sonuna yakın) coinleri ele.
         and r.get("change_24h_percent", 0.0) <= MAX_24H_CHANGE_FOR_BUY_PCT
+        # v7 FIX: volatilite filtresi — çok sert/gappy hareket eden coinler,
+        # stop-loss'un iki kontrol arasında büyük farkla aşılmasına yol
+        # açıyordu (kullanıcı geri bildirimi: %2 yerine -4/-5% ile kapanma).
         and r.get("avg_hourly_range_pct", 0.0) <= MAX_HOURLY_VOLATILITY_PCT
         and held_category_counts[get_category(r["symbol"])] < MAX_PER_CATEGORY.get(get_category(r["symbol"]), 3)
     ]
@@ -975,6 +974,9 @@ def run_scan_cycle(client: SupabaseRestClient):
         if remaining_cash < MIN_TRADE_AMOUNT_TRY:
             break
 
+        # v5 FIX: alımdan hemen önce son kez "gerçekten işlem görüyor mu"
+        # kontrolü — 24h hacim filtresini geçmiş olsa bile son saatlerde
+        # ölü olabilir (bkz. is_recently_active tanımı ve v5 notu).
         if not is_recently_active(candidate["symbol"]):
             logger.warning(
                 f"{candidate['symbol']}: 24h hacim filtresini geçti ama son saatlerde "
