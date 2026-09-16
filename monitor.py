@@ -1,35 +1,33 @@
 """
 ==============================================================================
-POZİSYON İZLEME (Hafif, Sık Çalışan Script)
+Hafif Pozisyon İzleme Scripti (monitor.py)
 ==============================================================================
-trading_bot.py'nin tam tarama+alım döngüsü 10 dakikada bir çalışıyor.
-Ama stop-loss/iz süren stop kararlarının daha hızlı tepki vermesi için,
-bu script SADECE pozisyon izleme/kapatma kısmını daha sık (5 dakikada bir)
-çalıştırır. Yeni alım yapmaz, sadece mevcut pozisyonları kontrol eder.
+trading_bot.py'nin tam tarama+alım döngüsü 10 dakikada bir çalışıyor. Bu
+script SADECE açık pozisyonları stop-loss / trailing-stop kurallarına göre
+izleyip kapatır — yeni alım YAPMAZ, Gemini'yi çağırmaz (maliyetsiz ve hızlı).
 
-Not: Gerçek "30 saniyede bir" izleme, sürekli çalışan bir sunucu gerektirir;
-GitHub Actions'ın ücretsiz katmanında pratik minimum ~5 dakikadır. Tarayıcı
-açıkken zaten çok daha sık (birkaç saniyede bir) izleme yapılıyor; bu script
-sadece tarayıcı kapalıyken de makul bir tepki hızı sağlamak içindir.
+Amaç: iz süren stop gibi zamana duyarlı çıkışların, 10 dakikalık tarama
+aralığı içinde oluşup geri dönen fiyat hareketleri yüzünden kaçırılmasını
+önlemek — bunun için bu script çok daha sık (örn. 5 dakikada bir) ayrı bir
+GitHub Actions workflow'u (.github/workflows/monitor.yml) ile çalıştırılır.
+
+NOT: Bu dosya, repodaki orijinal monitor.py paylaşılmadığı için, repo
+denetim raporunda tarif edilen akışa (bot config oku → emergency_stop
+kontrolü → monitor_and_close_positions çağır) göre yeniden oluşturulmuştur.
+Eğer gerçek monitor.py'niz farklı ek mantık içeriyorsa (örn. farklı
+loglama, farklı hata yönetimi), bu dosyayı onun yerine kullanmadan önce
+karşılaştırın.
 ==============================================================================
 """
 
-from trading_bot import SupabaseRestClient, fetch_all_try_data, monitor_and_close_positions, logger, SUPABASE_URL, SUPABASE_KEY
+from trading_bot import SupabaseRestClient, monitor_and_close_positions, SUPABASE_URL, SUPABASE_KEY, logger
 
 if __name__ == "__main__":
-    logger.info("=== HAFİF POZİSYON İZLEME BAŞLIYOR ===")
+    logger.info("=== HAFİF POZİSYON İZLEME BAŞLADI (monitor.py) ===")
     client = SupabaseRestClient(SUPABASE_URL, SUPABASE_KEY)
-    try:
-        config = client.get_bot_config()
-        if config.get("emergency_stop"):
-            logger.warning("ACİL DURDURMA aktif, izleme yine de yapılıyor (kapatma için).")
-
-        df_all = fetch_all_try_data()
-        if df_all.empty:
-            logger.error("Binance verisi boş geldi, izleme atlanıyor.")
-        else:
-            price_lookup = dict(zip(df_all['symbol'], df_all['lastPrice']))
-            monitor_and_close_positions(client, price_lookup, config)
-    except Exception as e:
-        logger.error(f"Beklenmeyen hata: {e}", exc_info=True)
-        raise
+    config = client.get_bot_config()
+    if config.get("emergency_stop", False):
+        logger.warning("ACİL DURDURMA aktif, pozisyon izleme bu döngüde atlanıyor.")
+    else:
+        monitor_and_close_positions(client, config)
+    logger.info("=== HAFİF POZİSYON İZLEME TAMAMLANDI ===")
