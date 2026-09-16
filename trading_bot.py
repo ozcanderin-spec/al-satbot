@@ -1,9 +1,23 @@
 """
 ==============================================================================
-Binance TR AI Algo-Trading Bot - 7/24 Otonom Tarama & Sanal Alım Motoru (v2)
+Binance TR AI Algo-Trading Bot - 7/24 Otonom Tarama & Sanal Alım Motoru (v3)
 ==============================================================================
 GitHub Actions üzerinde periyodik çalıştırılmak üzere tasarlanmıştır.
 Tek bir tarama+alım döngüsü çalıştırıp çıkar (scheduled cron ile tetiklenir).
+
+v3 DEĞİŞİKLİKLERİ (bug fix turu):
+1) monitor_and_close_positions artık stop-loss / trailing eşiklerini
+   config (bot_config tablosu) üzerinden okuyor. Önceden fonksiyon bir
+   config parametresi alıyordu ama HİÇ KULLANMIYORDU — stop-loss her zaman
+   sabit %2 (STOP_LOSS_PERCENT_DEFAULT) ile çalışıyordu, dashboard'dan
+   girilen değerler etkisizdi. Artık config'te yoksa sabitlere düşer.
+2) fetch_live_price artık başarısızlıkları (hangi sembol, hangi URL, hangi
+   hata) tek tek logluyor ve bir döngü sonunda kaç pozisyonun fiyatının
+   alınamadığını özetliyor, böylece GitHub Actions logunda görünür oluyor
+   ("sessiz atlama" sorunu ortadan kalktı). Ayrıca timeout süresi artırıldı
+   ve iki uç noktanın ikisi de denenip en son hata saklanıyor.
+3) monitor_and_close_positions'taki kullanılmayan price_lookup parametresi
+   kaldırıldı (zaten fetch_live_price ile ayrı ayrı çekiliyordu).
 
 Gereksinimler:
 pip install requests pandas google-generativeai yfinance
@@ -30,7 +44,7 @@ import requests
 import pandas as pd
 import yfinance as yf
 import google.generativeai as genai
-from typing import List, Dict, Any, Set
+from typing import List, Dict, Any, Set, Optional
 from collections import Counter
 
 # ------------------------------------------------------------------------------
@@ -54,16 +68,20 @@ BINANCE_TICKER_URLS = [
     "https://api.binance.com/api/v3/ticker/24hr",
 ]
 
-# --- Strateji sabitleri (kullanıcı talebine göre ayarlanmıştır) ---
+# --- Strateji sabitleri (bot_config tablosunda karşılığı YOKSA bu varsayılanlar kullanılır) ---
 STOP_LOSS_PERCENT_DEFAULT = 2.0        # Sabit stop-loss (kâr %3'e ulaşana kadar)
-TRAILING_ACTIVATION_PCT = 3.0          # Bu kâr yüzdesinden sonra iz süren stop devreye girer
-TRAILING_DISTANCE_PCT = 1.2            # Zirveden bu yüzde kadar geri çekilince iz süren stop
+TRAILING_ACTIVATION_PCT_DEFAULT = 3.0  # Bu kâr yüzdesinden sonra iz süren stop devreye girer
+TRAILING_DISTANCE_PCT_DEFAULT = 1.2    # Zirveden bu yüzde kadar geri çekilince iz süren stop
 FEE_RATE = 0.001                        # Binance standart %0.1 komisyon
 MAX_UNIVERSE_SIZE = 250                 # Ucuz taramada bakılacak azami parite sayısı
 MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detaylı analiz edilecek azami sayı
 LOSS_COOLDOWN_HOURS = 3                 # Zararla kapanan bir coin bu süre boyunca tekrar alınmaz
 MIN_TRADE_AMOUNT_TRY = 100.0            # Minimum işlem tutarı
 PEAK_PROXIMITY_PENALTY_PCT = 3.0        # 30 günlük zirveye bu kadar yakınsa puan kırılır
+
+# Canlı fiyat çekimi için deneme ayarları
+PRICE_FETCH_TIMEOUT_SECONDS = 12
+PRICE_FETCH_RETRIES_PER_URL = 2
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +125,9 @@ class SupabaseRestClient:
         default = {
             "active_mode": "VIRTUAL", "emergency_stop": False, "min_ai_score_to_buy": 75,
             "virtual_balance": 10000.0, "max_balance_usage_pct": 70.0, "reserve_cash_pct": 30.0,
+            "stop_loss_percent": STOP_LOSS_PERCENT_DEFAULT,
+            "trailing_activation_pct": TRAILING_ACTIVATION_PCT_DEFAULT,
+            "trailing_distance_pct": TRAILING_DISTANCE_PCT_DEFAULT,
         }
         try:
             resp = requests.get(url, headers=self.headers, params={"select": "*", "limit": 1}, timeout=10)
@@ -188,6 +209,10 @@ class SupabaseRestClient:
             logger.warning(f"Zirve fiyat güncellenemedi ({trade_id}): {e}")
 
     def close_trade(self, trade_id: str, exit_price: float, realized_pnl: float, reason: str) -> bool:
+        # NOT: exit_price burada gerçek canlı fiyat olarak gönderiliyor.
+        # Rapor/dashboard tarafında "Çıkış Fiyatı" giriş fiyatıyla aynı
+        # görünüyorsa bu, dashboard'un yanlış alanı okumasından kaynaklanır
+        # (bkz. proje notları) — bu satır zaten doğru değeri yazıyor.
         url = f"{self.base_url}/rest/v1/trades"
         payload = {
             "is_active": False, "status": "FILLED", "exit_price": exit_price,
@@ -266,18 +291,42 @@ def fetch_all_try_data() -> pd.DataFrame:
     return df_try
 
 
-def fetch_live_price(symbol: str) -> float | None:
-    """Açık pozisyon için anlık fiyatı doğrudan Binance ticker'dan alır."""
+def fetch_live_price(symbol: str) -> Optional[float]:
+    """Açık pozisyon için anlık fiyatı doğrudan Binance ticker'dan alır.
+
+    v3: Her URL için birkaç deneme yapar, HER başarısızlığı (sembol + URL +
+    hata mesajı + HTTP kodu varsa) ayrı ayrı loglar ki GitHub Actions
+    logunda tam olarak hangi sembollerin neden atlandığı görülebilsin.
+    Önceki sürümde bu hatalar sadece bir 'warning' olarak geçiyor ve
+    pozisyon sessizce bu döngüde atlanıyordu.
+    """
+    last_error = None
     for url in BINANCE_TICKER_URLS:
-        try:
-            resp = requests.get(url, params={"symbol": symbol}, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            price = float(data.get("lastPrice", 0))
-            if price > 0:
-                return price
-        except Exception as e:
-            logger.warning(f"{symbol} anlık fiyatı alınamadı ({url}): {e}")
+        for attempt in range(1, PRICE_FETCH_RETRIES_PER_URL + 1):
+            try:
+                resp = requests.get(url, params={"symbol": symbol}, timeout=PRICE_FETCH_TIMEOUT_SECONDS)
+                status = resp.status_code
+                if status == 451:
+                    # Bilinen sorun: bazı GitHub Actions runner IP'leri Binance
+                    # tarafından coğrafi/hukuki kısıtlama (451) ile engellenir.
+                    logger.error(
+                        f"{symbol}: {url} adresinden 451 (erişim engellendi) yanıtı alındı "
+                        f"— muhtemelen runner IP'si Binance tarafından kısıtlanmış."
+                    )
+                    last_error = f"HTTP 451 @ {url}"
+                    break  # bu URL'de tekrar denemenin anlamı yok, diğer URL'ye geç
+                resp.raise_for_status()
+                data = resp.json()
+                price = float(data.get("lastPrice", 0))
+                if price > 0:
+                    return price
+                last_error = f"geçersiz fiyat (0 veya eksik) @ {url}"
+            except Exception as e:
+                last_error = f"{e} @ {url} (deneme {attempt}/{PRICE_FETCH_RETRIES_PER_URL})"
+                logger.warning(f"{symbol} anlık fiyatı alınamadı: {last_error}")
+                continue
+
+    logger.error(f"{symbol}: TÜM kaynaklardan canlı fiyat alınamadı. Son hata: {last_error}")
     return None
 
 
@@ -440,20 +489,36 @@ def get_market_regime() -> str:
 # 5. POZİSYON İZLEME: STOP-LOSS / İZ SÜREN STOP (sabit take-profit YOK —
 #    kâr %3'ü geçince iz süren stop devreye girip yükselişten sonuna kadar faydalanmaya çalışır)
 # ------------------------------------------------------------------------------
-def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[str, float], config: Dict[str, Any]):
+def monitor_and_close_positions(client: SupabaseRestClient, config: Dict[str, Any]):
     logger.info("--- Açık pozisyonlar izleniyor (stop-loss / iz süren stop) ---")
-    stop_loss_percent = STOP_LOSS_PERCENT_DEFAULT
+
+    # v3 FIX: eşikler artık bot_config'ten okunuyor (önceden config hiç
+    # kullanılmıyordu ve stop-loss/trailing her zaman sabit değerlerle
+    # çalışıyordu — dashboard'dan girilen değerler etkisizdi).
+    stop_loss_percent = float(config.get("stop_loss_percent") or STOP_LOSS_PERCENT_DEFAULT)
+    trailing_activation_pct = float(config.get("trailing_activation_pct") or TRAILING_ACTIVATION_PCT_DEFAULT)
+    trailing_distance_pct = float(config.get("trailing_distance_pct") or TRAILING_DISTANCE_PCT_DEFAULT)
+    logger.info(
+        f"Aktif eşikler — Stop-Loss: %{stop_loss_percent} | "
+        f"Trailing aktivasyon: %{trailing_activation_pct} | Trailing mesafe: %{trailing_distance_pct}"
+    )
 
     open_positions = client.get_open_positions()
     if not open_positions:
         logger.info("Açık pozisyon yok, izleme atlanıyor.")
         return
 
+    price_fetch_failures = []
+
     for trade in open_positions:
         symbol = trade.get("symbol")
         live_price = fetch_live_price(symbol)
         if live_price is None or float(live_price) <= 0:
-            logger.error(f"{symbol} için doğrudan Binance güncel fiyatı alınamadı; yanlış fiyatla stop-loss çalıştırmamak için bu döngüde güvenli şekilde atlanıyor.")
+            price_fetch_failures.append(symbol)
+            logger.error(
+                f"{symbol} için doğrudan Binance güncel fiyatı alınamadı; yanlış fiyatla "
+                f"stop-loss çalıştırmamak için bu döngüde güvenli şekilde atlanıyor."
+            )
             continue
         live_price = float(live_price)
 
@@ -474,19 +539,27 @@ def monitor_and_close_positions(client: SupabaseRestClient, price_lookup: Dict[s
         gross_peak_value = quantity * live_highest
         net_peak_value = gross_peak_value * (1 - FEE_RATE)
         peak_profit_pct = ((net_peak_value - total_amount) / total_amount) * 100
-        is_trailing_active = peak_profit_pct >= TRAILING_ACTIVATION_PCT
+        is_trailing_active = peak_profit_pct >= trailing_activation_pct
         drawdown_pct = ((net_peak_value - live_value) / net_peak_value) * 100 if net_peak_value else 0
 
-        should_close = (drawdown_pct >= TRAILING_DISTANCE_PCT) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
+        should_close = (drawdown_pct >= trailing_distance_pct) if is_trailing_active else (pnl_pct <= -stop_loss_percent)
 
         if should_close:
             reason = "TRAILING_STOP" if is_trailing_active else "STOP_LOSS"
             client.close_trade(trade["id"], exit_price=live_price, realized_pnl=round(pnl, 2), reason=reason)
         else:
             if stored_highest is None or live_highest > previous_highest:
-                trailing_stop_price = round(live_highest * (1 - TRAILING_DISTANCE_PCT / 100), 8) if is_trailing_active else None
+                trailing_stop_price = round(live_highest * (1 - trailing_distance_pct / 100), 8) if is_trailing_active else None
                 client.update_trade_peak(trade["id"], live_highest, trailing_stop_price)
             logger.info(f"{symbol}: PnL %{pnl_pct:.2f} | Zirve kâr %{peak_profit_pct:.2f} | Trailing aktif: {is_trailing_active} — açık kalıyor.")
+
+    if price_fetch_failures:
+        logger.error(
+            f"ÖZET: {len(price_fetch_failures)}/{len(open_positions)} açık pozisyonun canlı fiyatı "
+            f"bu döngüde alınamadı ve stop-loss kontrolü YAPILAMADI: {price_fetch_failures}. "
+            f"Bu tekrarlıyorsa muhtemelen GitHub Actions runner IP'si Binance tarafından "
+            f"kısıtlanıyor (HTTP 451) — alternatif bir veri kaynağı/proxy gerekebilir."
+        )
 
     logger.info("--- Pozisyon izleme tamamlandı ---")
 
@@ -641,17 +714,16 @@ def run_scan_cycle(client: SupabaseRestClient):
 
     logger.info(f"Mod: {mode} | Acil Durdurma: {emergency_stop} | Min Skor: {min_ai_score}")
 
-    df_all = fetch_all_try_data()
-    price_lookup = dict(zip(df_all['symbol'], df_all['lastPrice'])) if not df_all.empty else {}
-
-    # 1) Önce açık pozisyonları izle/kapat (tarayıcı kapalı olsa bile)
-    # Piyasa taraması boş gelse bile açık pozisyonların fiyatı doğrudan sorgulanır.
-    monitor_and_close_positions(client, price_lookup, config)
+    # 1) Önce açık pozisyonları izle/kapat (tarayıcı kapalı olsa bile).
+    # v3 FIX: price_lookup parametresi kaldırıldı — kullanılmıyordu, canlı
+    # fiyat zaten fetch_live_price ile pozisyon bazında doğrudan çekiliyor.
+    monitor_and_close_positions(client, config)
 
     if emergency_stop:
         logger.warning("ACİL DURDURMA aktif! Açık pozisyonlar izlendi; yeni alım yapılmayacak.")
         return
 
+    df_all = fetch_all_try_data()
     if df_all.empty:
         logger.error("Binance verisi boş geldi, yeni tarama/alım döngüsü atlanıyor.")
         return
