@@ -42,6 +42,7 @@ import json
 import logging
 import requests
 import pandas as pd
+import numpy as np
 import yfinance as yf
 from google import genai
 from google.genai import types as genai_types
@@ -78,14 +79,12 @@ MAX_UNIVERSE_SIZE = 250                 # Ucuz taramada bakılacak azami parite 
 MAX_DETAILED_ANALYSIS = 40              # Gemini + gerçek gösterge ile detaylı analiz edilecek azami sayı
 LOSS_COOLDOWN_HOURS = 3                 # Zararla kapanan bir coin bu süre boyunca tekrar alınmaz
 MIN_TRADE_AMOUNT_TRY = 100.0            # Minimum işlem tutarı
-PEAK_PROXIMITY_PENALTY_PCT = 3.0        # 30 günlük zirveye bu kadar yakınsa puan kırılır
-MAX_24H_CHANGE_FOR_BUY_PCT = 12.0       # v7 FIX: 24 saatte bu yüzdeden fazla artmış coin
-                                          # ALINMAZ — "yükselişin sonunda alım" sorununu
-                                          # önlemek için (kullanıcı geri bildirimi).
-MAX_HOURLY_VOLATILITY_PCT = 6.0         # v7 FIX: son 20 saatlik ortalama (high-low)/close
-                                          # oranı bu değeri aşan coinler ALINMAZ — çok sert/
-                                          # gappy hareket eden coinlerde stop-loss iki kontrol
-                                          # arasında büyük farkla aşılıyordu (%2 yerine -4/-5%).
+# v8 FIX: 30-gün-zirve-yakınlığı / 24h-değişim / saatlik-oynaklık artık SERT
+# birer alım filtresi değil — kullanıcı isteğiyle (gerçek fırsatları kaçırmamak
+# için) tamamen puanlama sistemine devredildi. Eşik değerleri artık sadece
+# yukarıdaki Gemini prompt'unun puanlama metninde (HER PARİTE İÇİN HAM
+# PUANLAMA KURALLARI) doğrudan sayı olarak geçiyor; burada ayrı sabitler
+# olarak tutulmuyorlar ki "tanımlı ama kullanılmıyor" kafa karışıklığı olmasın.
 
 # Canlı fiyat çekimi için deneme ayarları
 PRICE_FETCH_TIMEOUT_SECONDS = 12
@@ -449,6 +448,7 @@ def fetch_klines(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataF
             ])
             df["close"] = pd.to_numeric(df["close"], errors="coerce")
             df["high"] = pd.to_numeric(df["high"], errors="coerce")
+            df["low"] = pd.to_numeric(df["low"], errors="coerce")
             df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
             return df
         except Exception as e:
@@ -505,7 +505,15 @@ def compute_indicators(symbol: str) -> Dict[str, Any]:
         # ne kadar "sert/gappy" hareket ettiğinin basit bir ölçüsü. Yüksek
         # değer = fiyat saat içinde büyük sıçramalar yapıyor = stop-loss'un
         # iki kontrol arasında büyük farkla aşılma riski yüksek.
-        recent_ranges_pct = ((highs - lows) / closes.replace(0, pd.NA)).tail(20) * 100
+        # v8 FIX: eskiden closes.replace(0, pd.NA) kullanılıyordu — bu bazı
+        # pandas sürümlerinde beklenmedik bir string dtype dönüşümüne yol
+        # açıp "unsupported operand type(s) for -: 'float' and 'str'"
+        # hatasıyla tüm döngüyü çökertiyordu. np.where ile güvenli hale
+        # getirildi.
+        closes_safe = np.where(closes.to_numpy(dtype=float) == 0, np.nan, closes.to_numpy(dtype=float))
+        ranges_raw = (highs.to_numpy(dtype=float) - lows.to_numpy(dtype=float)) / closes_safe
+        recent_ranges_pct = pd.Series(ranges_raw).tail(20) * 100
+        recent_ranges_pct = recent_ranges_pct.replace([np.inf, -np.inf], np.nan).dropna()
         result["avg_hourly_range_pct"] = round(float(recent_ranges_pct.mean()), 2) if not recent_ranges_pct.empty else 0.0
 
     df_1d = fetch_klines(symbol, interval="1d", limit=30)
@@ -756,6 +764,7 @@ def analyze_markets_with_gemini(shortlist: pd.DataFrame, market_regime: str):
             "ema_trend": indicators["trend"],
             "volume_vs_avg_ratio": indicators["volume_ratio"],
             "pct_below_30d_high": indicators["pct_from_30d_high"],
+            "avg_hourly_volatility_pct": indicators["avg_hourly_range_pct"],
         })
 
     prompt = f"""
@@ -780,7 +789,7 @@ NOT: Bu ağırlıklar, 364 coin / 6 aylık / 56.092 gün-gözlemlik gerçek geç
 üzerinde yapılan "taban oran karşılaştırmalı" (lift) analize dayanır — klasik
 "aşırı satımda al, aşırı alımda sat" mantığı DEĞİL, gerçek istatistiksel bulgu
 kullanılmıştır:
-- rsi_14 > 70 (momentum devam ediyor, gerçek veride LIFT 2.28x — EN GÜÇLÜ sinyal): +18 puan
+- rsi_14 > 70 (momentum devam ediyor): +10 puan (v8 FIX: eskiden +18'di — kullanıcı isteğiyle daha makul bir ağırlığa çekildi; RSI tek başına bir coini yüksek puana taşımasın, diğer göstergelerle dengeli katkı yapsın)
 - rsi_14 60-70 arası (LIFT 1.14x, hafif pozitif): +5 puan
 - rsi_14 30-40 arası (LIFT 0.74x, hafif negatif): -8 puan
 - rsi_14 < 30 (gerçek veride öngörü değeri neredeyse yok, LIFT 0.94x): 0 puan (ne ödül ne ceza)
@@ -788,8 +797,15 @@ kullanılmıştır:
 - ema_trend == "GÜÇLÜ_DÜŞÜŞ" (LIFT 0.76x): -15 | "DÜŞÜŞ" (LIFT 0.94x, hafif negatif): -3
 - volume_vs_avg_ratio > 1.5 (LIFT 1.74x — güçlü gerçek sinyal): +15 puan (2x'ten fazlaysa +22 puan ver, orantılı düşün)
 - volume_vs_avg_ratio < 1.0 (LIFT ~0.83x, hafif negatif, iki taraf da benzer): -5 puan
-- change_24h_percent > 15: -10 (aşırı ısınmış, kısa vadeli geri çekilme riski)
-- pct_below_30d_high < 3 (30 günlük ZİRVEYE çok yakın): -15 puan (v6 FIX: gerçek veri lift'i zayıf çıkmıştı [0.90x] diye -5'e düşürülmüştü, ama canlı işlemlerde zirveden alınan pozisyonlar geri çekilme yaşadı — kullanıcı geri bildirimiyle tekrar güçlü bir ceza olarak ayarlandı. Ayrıca aşağıda run_scan_cycle'da SERT bir filtre de var: zirveye bu kadar yakın adaylar puanları ne olursa olsun ALINMIYOR.)
+- change_24h_percent: v8 FIX — artık SERT bir alım engeli YOK, sadece kademeli puan cezası var (gerçekten güçlü bir hareketi tamamen kaçırmamak için — ör. %60 artmış ama hâlâ güçlü RSI/EMA/hacim sinyali veren bir coin, diğer puanlarla dengelenip yine de alınabilmeli):
+  * 15-30 arası: -8 puan (ısınmış, dikkatli ama hâlâ değerlendirilebilir)
+  * 30'dan fazla: -15 puan (çok ısınmış, geri çekilme riski yüksek ama diğer güçlü sinyaller varsa yine de eşiği geçebilir)
+- avg_hourly_volatility_pct (son 20 saatlik ortalama (high-low)/close oranı, v8 FIX — yeni eklendi, artık SERT filtre değil sadece puanlama): 
+  * < 1.0 (çok durgun, gerçek fiyat hareketi az): -5 puan (fırsat potansiyeli düşük)
+  * 1.0 - 4.0 arası (sağlıklı/normal hareket): 0 puan (ideal aralık, ne ödül ne ceza)
+  * 4.0 - 7.0 arası (yüksek oynaklık): -5 puan (riskli ama potansiyel fırsat da olabilir)
+  * 7.0'dan fazla (aşırı oynak/gappy): -12 puan (stop-loss'un iki kontrol arasında büyük farkla aşılma riski yüksek)
+- pct_below_30d_high < 3 (30 günlük ZİRVEYE çok yakın): -15 puan (v8 FIX: artık SERT bir alım engeli değil, sadece güçlü bir puan cezası — kullanıcı isteğiyle salt puanlama sistemine dönüldü, böylece diğer sinyaller çok güçlüyse zirveye yakın olsa da alınabilir)
 - pct_below_30d_high diğer durumlarda: puan etkisi yok (gerçek veri anlamlı bir fark göstermedi)
 
 Puanı 0-100 aralığında sınırla. Sonra:
@@ -942,19 +958,12 @@ def run_scan_cycle(client: SupabaseRestClient):
         and r["symbol"] not in held_symbols
         and r["symbol"] not in losing_cooldown_symbols
         and get_category(r["symbol"]) != "STABLE"
-        # v6 FIX: zirveden alımı engelle — kullanıcı isteği üzerine eklendi.
-        # Puan cezası (yukarıdaki Gemini prompt'unda -15) tek başına yetmedi;
-        # bu SERT bir filtre, AI skoru ne olursa olsun 30 günlük zirveye
-        # PEAK_PROXIMITY_PENALTY_PCT (%3) kadar veya daha yakın adayları
-        # tamamen eler.
-        and r.get("pct_from_30d_high", 100.0) >= PEAK_PROXIMITY_PENALTY_PCT
-        # v7 FIX: "yükselişin sonunda alım" sorunu — 24 saatte zaten çok
-        # yükselmiş (muhtemelen hareketin sonuna yakın) coinleri ele.
-        and r.get("change_24h_percent", 0.0) <= MAX_24H_CHANGE_FOR_BUY_PCT
-        # v7 FIX: volatilite filtresi — çok sert/gappy hareket eden coinler,
-        # stop-loss'un iki kontrol arasında büyük farkla aşılmasına yol
-        # açıyordu (kullanıcı geri bildirimi: %2 yerine -4/-5% ile kapanma).
-        and r.get("avg_hourly_range_pct", 0.0) <= MAX_HOURLY_VOLATILITY_PCT
+        # v8 FIX: zirveye yakınlık / 24h değişim / oynaklık artık SERT birer
+        # filtre değil — kullanıcı isteğiyle salt puanlama sistemine
+        # dönüldü (bkz. yukarıdaki Gemini prompt'undaki puan cezaları),
+        # böylece gerçekten güçlü fırsatlar (ör. %60 artmış ama hâlâ sağlam
+        # sinyalli bir coin) sırf bu üç faktörden biri yüzünden toptan
+        # elenmiyor. Risk kontrolü artık min_ai_score eşiğiyle sağlanıyor.
         and held_category_counts[get_category(r["symbol"])] < MAX_PER_CATEGORY.get(get_category(r["symbol"]), 3)
     ]
     candidates.sort(key=lambda r: r["ai_score"], reverse=True)
