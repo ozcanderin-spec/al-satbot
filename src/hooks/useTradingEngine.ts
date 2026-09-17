@@ -383,28 +383,6 @@ export function useTradingEngine() {
       const pnl = +(liveValue - trade.total_amount).toFixed(2);
       const pnlPct = +((pnl / trade.total_amount) * 100).toFixed(2);
 
-      // Trailing SL logic:
-      // Peak net value ever reached (using liveHighest):
-      const grossPeakValue = trade.quantity * liveHighest;
-      const peakSellFee = grossPeakValue * 0.001;
-      const netPeakValue = grossPeakValue - peakSellFee;
-      
-      // Calculate the peak profit % reached ever so far:
-      const peakProfitPct = +(((netPeakValue - trade.total_amount) / trade.total_amount) * 100).toFixed(2);
-
-      // Trailing stop loss activation threshold is 3.0% net profit
-      const isTrailingActive = peakProfitPct >= 3.0;
-
-      // Drawdown % from highest peak net value:
-      const drawdownPct = +(((netPeakValue - liveValue) / netPeakValue) * 100).toFixed(2);
-
-      // Dynamic stop loss threshold to protect profit if volume drops:
-      // If trade is in profit (unrealized_pnl > 0) and volume is dropping, tighten the stop loss limit to lock profit
-      const volumeDropKoru = pnl > 0 && isVolumeDropping;
-      const activeSLPercent = volumeDropKoru 
-        ? Math.max(0.4, currentConfig.stop_loss_percent * 0.4) // E.g. 1.2% becomes 0.48% trailing stop
-        : currentConfig.stop_loss_percent;
-
       const updatedTrade: Trade = {
         ...trade,
         current_price: livePrice,
@@ -425,31 +403,18 @@ export function useTradingEngine() {
       // tarafında zaten yaptığımız "tek otorite" prensibini kapatma tarafına da
       // taşıyor — iki ayrı yerin (tarayıcı + bot) aynı anda, farklı fiyat
       // kaynaklarıyla kapatma denemesi "çırpınma"ya (fazladan aç/kapa) yol açıyordu.
-      // Aşağıdaki blok artık SADECE ekranda gösterim ve zirve fiyat takibi yapıyor,
-      // gerçek kapatma yazmıyor.
-      {
-        remainingTrades.push(updatedTrade);
-
-        // Yeni bir zirve fiyata ulaşıldıysa, iz süren stop'un kalıcı olması için
-        // bunu Supabase'e yaz (sayfa yenilense veya başka bir cihazdan bakılsa bile kaybolmasın).
-        if (liveHighest > previousHighest) {
-          try {
-            const sb = getSupabase();
-            const trailingStopPrice = isTrailingActive
-              ? +(liveHighest * (1 - activeSLPercent / 100)).toFixed(8)
-              : null;
-            const peakUpdatePayload: Record<string, unknown> = { highest_price_reached: liveHighest };
-            if (trailingStopPrice !== null) {
-              peakUpdatePayload.trailing_stop_price = trailingStopPrice;
-            }
-            if (trade.id && !trade.id.startsWith('trade-')) {
-              sb.from('trades').update(peakUpdatePayload).eq('id', trade.id).then();
-            }
-          } catch (err) {
-            console.warn('Zirve fiyat güncelleme hatası:', err);
-          }
-        }
-      }
+      //
+      // DÜZELTME: Bu blok daha önce, ekranda göstermenin yanı sıra, yeni bir zirve
+      // fiyata ulaşıldığında highest_price_reached / trailing_stop_price alanlarını
+      // da Supabase'e YAZIYORDU. Bu tek yazma noktası, farklı cihazların (özellikle
+      // arka plandaki/gecikmeli sekmelerin) zaten kapanmış bir pozisyona kendi eski
+      // fiyatlarıyla yazmaya devam etmesine yol açıyordu (EDENTRY'de görülen
+      // post-close veri bozulmasının kaynağı buydu). highest_price_reached ve
+      // trailing_stop_price artık SADECE sunucu tarafında (run_virtual_sell_engine,
+      // 30 saniyede bir gerçek canlı fiyatla) hesaplanıp yazılıyor; tarayıcı sadece
+      // kendi ekranı için `liveHighest`'i local state'te (`updatedTrade.highest_price`)
+      // tutuyor, Supabase'e hiçbir şey yazmıyor.
+      remainingTrades.push(updatedTrade);
     });
 
     // Tetiklenen işlemleri cüzdana yansıt ve kapat (React side-effect'leri temizce uygula)
