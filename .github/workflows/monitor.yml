@@ -1,27 +1,11 @@
-name: Position Monitor (Stop-Loss / Trailing Stop)
+name: Position Monitor (Disabled)
 
 on:
   workflow_dispatch: {}
 
 jobs:
-  monitor:
+  disabled:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
-      - name: Repo checkout
-        uses: actions/checkout@v4
-
-      - name: Python 3.11 kur
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Bağımlılıkları kur
-        run: pip install requests pandas google-genai yfinance
-
-      - name: Pozisyonları izle / kapat
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python monitor.py
+      - name: Disabled - Supabase owns position closing
+        run: echo "Position closing is owned exclusively by Supabase run_virtual_sell_engine() via pg_cron."
