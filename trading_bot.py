@@ -769,15 +769,18 @@ def run_scan_cycle(client: SupabaseRestClient):
 
     held_category_counts = Counter(get_category(s) for s in held_symbols)
 
+    # NOT: 30 günlük zirve yakınlığı / 24s değişim / saatlik volatilite artık
+    # burada SERT ENGEL olarak uygulanmıyor — bu üç faktör zaten Gemini'nin
+    # puanlamasına (analyze_markets_with_gemini prompt'u) kademeli ceza olarak
+    # gömülü. Burada da tekrar sert filtre olarak uygulamak, yüksek puan alan
+    # (89-93 gibi) güçlü momentum coinlerini puanlarına bakılmaksızın eleyip
+    # botu neredeyse hiç alım yapamaz hale getiriyordu.
     candidates = [
         r for r in records_to_upsert
         if r["ai_score"] >= effective_min_score
         and r["symbol"] not in held_symbols
         and r["symbol"] not in losing_cooldown_symbols
         and get_category(r["symbol"]) != "STABLE"
-        and r.get("pct_from_30d_high", 100.0) >= PEAK_PROXIMITY_PENALTY_PCT
-        and r.get("change_24h_percent", 0.0) <= MAX_24H_CHANGE_FOR_BUY_PCT
-        and r.get("avg_hourly_range_pct", 0.0) <= MAX_HOURLY_VOLATILITY_PCT
         and held_category_counts[get_category(r["symbol"])] < MAX_PER_CATEGORY.get(get_category(r["symbol"]), 3)
     ]
     candidates.sort(key=lambda r: r["ai_score"], reverse=True)
