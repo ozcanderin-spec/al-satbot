@@ -1,6 +1,6 @@
 """
 ================================================================================
-Binance TR AI Algo-Trading Bot - 7/24 Otonom Tarama & Sanal Alım Motoru (v3.2)
+Binance TR AI Algo-Trading Bot - 7/24 Otonom Tarama & Sanal Alım Motoru (v3.3)
 ================================================================================
 GitHub Actions üzerinde periyodik çalıştırılmak üzere tasarlanmıştır.
 Tek bir tarama+alım döngüsü çalıştırıp çıkar (scheduled cron ile tetiklenir).
@@ -11,6 +11,16 @@ Tek bir tarama+alım döngüsü çalıştırıp çıkar (scheduled cron ile teti
   run_virtual_sell_engine() tarafından yürütülür.
 - Bu dosyada kendi close-position takibi yoktur; bu, iki sistem arasında
   çakışmayı önler.
+
+v3.3 DEĞİŞİKLİKLERİ (dış AI önerisinden, doğrulanmış iki madde):
+1) Zaten açık pozisyonda olan / soğuma süresindeki semboller artık 40
+   kişilik detaylı analiz kısa listesine hiç girmiyor (önceden kısa liste
+   oluşturulduktan sonra eleniyorlardı — bu, gerçek yeni aday sayısını ve
+   Gemini API bütçesini gereksiz yere tüketiyordu).
+2) Her adayın puanını oluşturan ham bileşenler (RSI, EMA trend, hacim
+   oranı, 30 günlük zirveye yakınlık, saatlik volatilite, piyasa rejimi)
+   artık market_scans tablosuna da kaydediliyor — ileride hangi sinyalin
+   gerçekten kâr getirdiğini ölçebilmek için.
 
 v3.2 DEĞİŞİKLİKLERİ (strateji analizi sonrası):
 1) get_market_regime() daha önce hesaplanıyordu ama sonucu Gemini'ye HİÇ
@@ -739,7 +749,11 @@ def run_scan_cycle(client: SupabaseRestClient):
     losing_cooldown_symbols = client.get_recent_losing_symbols(LOSS_COOLDOWN_HOURS)
     logger.info(f"Soğuma süresinde olan (son {LOSS_COOLDOWN_HOURS}s zararlı) semboller: {losing_cooldown_symbols}")
 
-    shortlist = shortlist_for_detailed_analysis(universe, excluded_symbols=set())
+    # v3.3 FIX: zaten açık pozisyonda olan veya soğuma süresindeki semboller
+    # daha önce 40 kişilik kısa listeye giriyor, gereksiz yere Gemini API
+    # bütçesini ve gerçek yeni aday sayısını tüketiyordu. Artık kısa liste
+    # oluşturulmadan ÖNCE dışarıda bırakılıyorlar.
+    shortlist = shortlist_for_detailed_analysis(universe, excluded_symbols=held_symbols | losing_cooldown_symbols)
     if shortlist.empty:
         logger.error("Kısa liste boş çıktı, döngü sonlandırılıyor.")
         return
@@ -780,6 +794,14 @@ def run_scan_cycle(client: SupabaseRestClient):
             "ai_score": ai_score,
             "signal_type": signal_type,
             "scan_reason": scan_reason,
+            # v3.3 FIX: puanı oluşturan bileşenleri de kaydet — ileride hangi
+            # sinyalin gerçekten kâr getirdiğini ölçebilmek için (öneri #12).
+            "rsi_14": symbol_indicators.get("rsi"),
+            "ema_trend": symbol_indicators.get("trend"),
+            "volume_vs_avg_ratio": symbol_indicators.get("volume_ratio"),
+            "pct_from_30d_high": pct_from_30d_high,
+            "avg_hourly_volatility_pct": avg_hourly_range_pct,
+            "market_regime": market_regime,
         })
 
     scans_ok = client.upsert_market_scans(market_scan_payload)
