@@ -1,6 +1,6 @@
 """
 ================================================================================
-Binance TR AI Algo-Trading Bot - 7/24 Otonom Tarama & Sanal Alım Motoru (v3.1)
+Binance TR AI Algo-Trading Bot - 7/24 Otonom Tarama & Sanal Alım Motoru (v3.2)
 ================================================================================
 GitHub Actions üzerinde periyodik çalıştırılmak üzere tasarlanmıştır.
 Tek bir tarama+alım döngüsü çalıştırıp çıkar (scheduled cron ile tetiklenir).
@@ -11,6 +11,17 @@ Tek bir tarama+alım döngüsü çalıştırıp çıkar (scheduled cron ile teti
   run_virtual_sell_engine() tarafından yürütülür.
 - Bu dosyada kendi close-position takibi yoktur; bu, iki sistem arasında
   çakışmayı önler.
+
+v3.2 DEĞİŞİKLİKLERİ (strateji analizi sonrası):
+1) get_market_regime() daha önce hesaplanıyordu ama sonucu Gemini'ye HİÇ
+   iletilmiyordu — prompt sadece "rejime göre çarpan uygula" kuralını
+   anlatıyor, ama Gemini'ye şu an hangi rejimde olduğumuzu söylemiyordu.
+   Artık gerçek rejim değeri prompt'a açıkça ekleniyor.
+2) Gerçek işlem verisi analizi, DÜŞÜŞ rejiminde kazanma oranının (%25)
+   YÜKSELİŞ'e (%45.5) göre belirgin şekilde düşük olduğunu gösterdi.
+   get_position_size_try artık market_regime parametresi alıyor ve
+   DÜŞÜŞ rejiminde pozisyon yüzdelerini yarıya indiriyor (bot tamamen
+   durmuyor ama kötü rejimde daha az sermaye riske atıyor).
 
 Gereksinimler:
 pip install requests pandas numpy yfinance google-genai
@@ -72,6 +83,14 @@ DEFAULT_MIN_AI_SCORE_TO_BUY = 78
 
 # Çeşitlendirme sınırı (talep edilen akış)
 MAX_PER_CATEGORY = {"MAJOR": 3, "ALT": 10, "STABLE": 1}
+
+# DÜŞÜŞ rejiminde pozisyon büyüklüğü çarpanı (v3.2) — gerçek işlem verisi
+# DÜŞÜŞ rejiminde kazanma oranının belirgin şekilde düştüğünü gösterdi.
+REGIME_POSITION_SIZE_MULTIPLIER = {
+    "YÜKSELİŞ": 1.0,
+    "NÖTR": 1.0,
+    "DÜŞÜŞ": 0.5,
+}
 
 PRICE_FETCH_TIMEOUT_SECONDS = 12
 PRICE_FETCH_RETRIES_PER_URL = 2
@@ -578,6 +597,13 @@ def analyze_markets_with_gemini(shortlist: pd.DataFrame, market_regime: str):
         logger.warning("Gemini client yok; yerel fallback puanlaması devreye alındı.")
         return _fallback_score_market(shortlist, indicators_by_symbol), indicators_by_symbol
 
+    # v3.2 FIX: market_regime artık gerçekten prompt'a ekleniyor. Önceden bu
+    # fonksiyon parametre olarak alıyordu ama hiçbir yerde kullanmıyordu —
+    # Gemini'ye "rejime göre çarpan uygula" kuralı anlatılıyordu ama hangi
+    # rejimde olduğumuz hiç söylenmiyordu, bu yüzden çarpan pratikte hiç
+    # uygulanamıyordu.
+    regime_multiplier = {"YÜKSELİŞ": "1.0", "NÖTR": "0.65", "DÜŞÜŞ": "0.35"}.get(market_regime, "0.65")
+
     prompt = f"""
 Sen kural tabanlı çalışan bir Kripto Para Teknik Analiz Motorusun. Kendi sezgine göre TAHMİN ETME;
 yalnızca aşağıda verilen GERÇEK, HESAPLANMIŞ göstergeleri belirtilen kurallara göre birleştirerek puanla.
@@ -585,10 +611,14 @@ yalnızca aşağıda verilen GERÇEK, HESAPLANMIŞ göstergeleri belirtilen kura
 ÇOK ÖNEMLİ — PUANLARIN BİRBİRİNE YAPIŞMASINI (AYNI SAYIYA TIKANMASINI) ÖNLE:
 Her parite farklı göstergelere sahip, bu yüzden puanları da farklı olmalı.
 
+ŞU ANKİ GENEL PİYASA REJİMİ (BTC 4 saatlik trend baz alınarak önceden hesaplandı): {market_regime}
+Bu rejime karşılık gelen çarpan: {regime_multiplier}
+
 1. Önce ham puanı hesapla (taban 50 + etkiler toplamı).
-2. Piyasa rejimine göre orantılı çarpan uygula:
+2. Piyasa rejimine göre yukarıda verilen ORANTILI ÇARPANI uygula:
    YÜKSELİŞ -> 1.0, NÖTR -> 0.65, DÜŞÜŞ -> 0.35.
    Formül: nihai_puan = 50 + (ham_puan - 50) * çarpan.
+   ÖNEMLİ: Yukarıda "ŞU ANKİ GENEL PİYASA REJİMİ" olarak verilen değeri kullan, kendi tahminini yapma.
 3. Sonucu 0-100 aralığında sınırla ve tam sayıya yuvarla.
 
 HAM PUANLAMA KURALLARI:
@@ -648,7 +678,7 @@ def get_available_cash(config: Dict[str, Any], open_positions: List[Dict[str, An
     return max(0.0, usable_capital - already_invested)
 
 
-def get_position_size_try(available_cash: float, ai_score: int) -> float:
+def get_position_size_try(available_cash: float, ai_score: int, market_regime: str = "NÖTR") -> float:
     if ai_score >= 90:
         pct = 0.14
     elif ai_score >= 80:
@@ -657,6 +687,12 @@ def get_position_size_try(available_cash: float, ai_score: int) -> float:
         pct = 0.07
     else:
         pct = 0.05
+
+    # v3.2 FIX: DÜŞÜŞ rejiminde pozisyon büyüklüğünü küçült — gerçek işlem
+    # verisi DÜŞÜŞ rejiminde kazanma oranının belirgin şekilde düştüğünü
+    # gösterdi (%25 vs YÜKSELİŞ'te %45.5). Bot tamamen durmuyor, sadece
+    # kötü rejimde daha az sermaye riske atıyor.
+    pct *= REGIME_POSITION_SIZE_MULTIPLIER.get(market_regime, 1.0)
 
     amount = available_cash * pct
     amount = max(MIN_TRADE_AMOUNT_TRY, amount)
@@ -807,7 +843,7 @@ def run_scan_cycle(client: SupabaseRestClient):
             )
             continue
 
-        amount_try = get_position_size_try(remaining_cash, candidate["ai_score"])
+        amount_try = get_position_size_try(remaining_cash, candidate["ai_score"], market_regime)
         buy_fee = amount_try * FEE_RATE
         net_investment = amount_try - buy_fee
         entry_price = candidate["price"]
