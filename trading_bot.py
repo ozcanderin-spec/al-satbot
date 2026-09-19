@@ -1,6 +1,6 @@
 """
 ================================================================================
-Binance TR AI Algo-Trading Bot - 7/24 Otonom Tarama & Sanal Alım Motoru (v3.3)
+Binance TR AI Algo-Trading Bot - 7/24 Otonom Tarama & Sanal Alım Motoru (v3.4)
 ================================================================================
 GitHub Actions üzerinde periyodik çalıştırılmak üzere tasarlanmıştır.
 Tek bir tarama+alım döngüsü çalıştırıp çıkar (scheduled cron ile tetiklenir).
@@ -11,6 +11,23 @@ Tek bir tarama+alım döngüsü çalıştırıp çıkar (scheduled cron ile teti
   run_virtual_sell_engine() tarafından yürütülür.
 - Bu dosyada kendi close-position takibi yoktur; bu, iki sistem arasında
   çakışmayı önler.
+
+v3.4 DEĞİŞİKLİKLERİ (19.09 rapor analizi sonrası):
+1) Tekrarlayan stop-loss kara listesi eklendi: aynı coin son 48 saatte
+   en az 2 kez STOP_LOSS ile kapanmışsa (HEITRY'nin iki gün üst üste aşırı
+   sert hareket etmesi gibi), o coin tamamen dışarıda bırakılıyor.
+2) min_ai_score_to_buy Supabase'de 81'den 85'e yükseltildi — daha az ama
+   daha seçici işlem.
+3) Kalan işlemlerde sermaye daha stratejik kullanılsın diye pozisyon
+   büyüklüğü yüzdeleri artırıldı (14/10/7/5 -> 18/13/9/6).
+4) Supabase'deki run_virtual_sell_engine() dinamik stop formülü biraz
+   daha nefes alacak şekilde genişletildi (çarpan 0.6->0.75, üst sınır
+   %5->%6) — sabit/dar stopun sürekli patladığı volatil coinlere biraz
+   daha hareket alanı tanımak için.
+NOT: Analiz, trailing-stop sonrası aynı coine yeniden giriş mekanizmasının
+("erken çıkma" değil) tam tersine bir trendin birden fazla bacağını
+başarıyla yakaladığını doğruladı (örn. ARTRY/XTZTRY aynı gün 3 kez
+kazançla alınıp satıldı) — bu davranış korunuyor, değiştirilmedi.
 
 v3.3 DEĞİŞİKLİKLERİ (dış AI önerisinden, doğrulanmış iki madde):
 1) Zaten açık pozisyonda olan / soğuma süresindeki semboller artık 40
@@ -85,6 +102,11 @@ FEE_RATE = 0.001
 MAX_UNIVERSE_SIZE = 250
 MAX_DETAILED_ANALYSIS = 40
 LOSS_COOLDOWN_HOURS = 3
+# v3.4: aynı coin bu kadar süre içinde en az bu kadar kez STOP_LOSS ile
+# kapanırsa, normal 3 saatlik soğumadan çok daha uzun süreliğine tamamen
+# devre dışı bırakılır (HEITRY gibi kronik "patlayan" coinler için).
+REPEAT_STOP_LOSS_LOOKBACK_HOURS = 48
+REPEAT_STOP_LOSS_MIN_COUNT = 2
 MIN_TRADE_AMOUNT_TRY = 100.0
 PEAK_PROXIMITY_PENALTY_PCT = 3.0
 MAX_24H_CHANGE_FOR_BUY_PCT = 12.0
@@ -232,6 +254,51 @@ class SupabaseRestClient:
         except Exception as e:
             logger.warning(f"Kapanmış işlemler okunamadı: {e}")
             return []
+
+    def get_repeat_stop_loss_symbols(self, hours: int, min_count: int) -> Set[str]:
+        """v3.4: Aynı coin kısa sürede birden fazla kez STOP_LOSS ile kapanmışsa
+        (örn. HEITRY'nin art arda iki gün aşırı sert hareket etmesi gibi),
+        bu coini normal 3 saatlik soğumadan çok daha uzun bir süre için
+        kara listeye al. Amaç: doğal olarak çok oynak/kırılgan coinlerin
+        tekrar tekrar denenip tekrar tekrar zarar ettirmesini önlemek.
+        """
+        url = f"{self.base_url}/rest/v1/trades"
+        params = {
+            "select": "symbol,exit_reason,closed_at",
+            "is_active": "eq.false",
+            "exit_reason": "eq.STOP_LOSS",
+            "order": "closed_at.desc",
+            "limit": "300",
+        }
+        if not self.base_url or not self.headers.get("apikey"):
+            return set()
+        try:
+            resp = requests.get(url, headers=self.headers, params=params, timeout=10)
+            resp.raise_for_status()
+            rows = resp.json()
+        except Exception as e:
+            logger.warning(f"Tekrarlayan stop-loss kontrolü için veri okunamadı: {e}")
+            return set()
+
+        cutoff = pd.Timestamp.now("UTC") - pd.Timedelta(hours=hours)
+        counts: Counter = Counter()
+        for r in rows:
+            try:
+                closed_at_raw = r.get("closed_at")
+                if closed_at_raw is None:
+                    continue
+                closed_at = pd.Timestamp(closed_at_raw)
+                if closed_at.tzinfo is None:
+                    closed_at = closed_at.tz_localize("UTC")
+                if closed_at >= cutoff:
+                    counts[r["symbol"]] += 1
+            except Exception:
+                continue
+
+        blacklisted = {sym for sym, c in counts.items() if c >= min_count}
+        if blacklisted:
+            logger.warning(f"Tekrarlayan stop-loss nedeniyle kara listeye alınan semboller (son {hours}s): {blacklisted}")
+        return blacklisted
 
     def update_trade_peak(self, trade_id: str, highest_price_reached: float, trailing_stop_price: Any = None) -> None:
         if not self.base_url or not self.headers.get("apikey"):
@@ -689,14 +756,17 @@ def get_available_cash(config: Dict[str, Any], open_positions: List[Dict[str, An
 
 
 def get_position_size_try(available_cash: float, ai_score: int, market_regime: str = "NÖTR") -> float:
+    # v3.4: min_ai_score_to_buy yükseltilip işlem sayısı azaltıldığı için,
+    # kalan (daha az ama daha kaliteli) işlemlerde sermayeyi daha stratejik
+    # kullanmak amacıyla yüzdeler artırıldı (14/10/7/5 -> 18/13/9/6).
     if ai_score >= 90:
-        pct = 0.14
+        pct = 0.18
     elif ai_score >= 80:
-        pct = 0.10
+        pct = 0.13
     elif ai_score >= 70:
-        pct = 0.07
+        pct = 0.09
     else:
-        pct = 0.05
+        pct = 0.06
 
     # v3.2 FIX: DÜŞÜŞ rejiminde pozisyon büyüklüğünü küçült — gerçek işlem
     # verisi DÜŞÜŞ rejiminde kazanma oranının belirgin şekilde düştüğünü
@@ -749,11 +819,19 @@ def run_scan_cycle(client: SupabaseRestClient):
     losing_cooldown_symbols = client.get_recent_losing_symbols(LOSS_COOLDOWN_HOURS)
     logger.info(f"Soğuma süresinde olan (son {LOSS_COOLDOWN_HOURS}s zararlı) semboller: {losing_cooldown_symbols}")
 
+    repeat_stop_loss_symbols = client.get_repeat_stop_loss_symbols(
+        REPEAT_STOP_LOSS_LOOKBACK_HOURS, REPEAT_STOP_LOSS_MIN_COUNT
+    )
+
     # v3.3 FIX: zaten açık pozisyonda olan veya soğuma süresindeki semboller
     # daha önce 40 kişilik kısa listeye giriyor, gereksiz yere Gemini API
     # bütçesini ve gerçek yeni aday sayısını tüketiyordu. Artık kısa liste
-    # oluşturulmadan ÖNCE dışarıda bırakılıyorlar.
-    shortlist = shortlist_for_detailed_analysis(universe, excluded_symbols=held_symbols | losing_cooldown_symbols)
+    # oluşturulmadan ÖNCE dışarıda bırakılıyorlar. v3.4: tekrarlayan
+    # stop-loss kara listesi de aynı şekilde en baştan dışarıda bırakılıyor.
+    shortlist = shortlist_for_detailed_analysis(
+        universe,
+        excluded_symbols=held_symbols | losing_cooldown_symbols | repeat_stop_loss_symbols,
+    )
     if shortlist.empty:
         logger.error("Kısa liste boş çıktı, döngü sonlandırılıyor.")
         return
