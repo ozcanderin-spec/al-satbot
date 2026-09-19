@@ -885,6 +885,10 @@ def run_scan_cycle(client: SupabaseRestClient):
             "scan_reason": candidate["scan_reason"],
             "mode": mode,
             "realized_pnl": 0,
+            # v3.3: satış motorunun coin bazında dinamik stop-loss
+            # hesaplayabilmesi için alım anındaki ortalama saatlik
+            # volatiliteyi de kaydet.
+            "entry_volatility_pct": candidate.get("avg_hourly_range_pct"),
         }
         if client.insert_trade(trade_record, position_pct=position_pct):
             remaining_cash -= amount_try
